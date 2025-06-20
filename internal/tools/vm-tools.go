@@ -9,9 +9,17 @@ import (
 	"github.com/vagrant-mcp/server/pkg/mcp"
 )
 
+// DevVMManager defines the interface for VM management used by CreateDevVMTool
+// This allows for mocking in tests.
+type DevVMManager interface {
+	CreateVM(name string, projectPath string, config vm.VMConfig) error
+	StartVM(name string) error
+	GetVMState(name string) (vm.State, error)
+}
+
 // CreateDevVMTool implements the create_dev_vm tool
 type CreateDevVMTool struct {
-	manager *vm.Manager
+	manager DevVMManager
 }
 
 // Name returns the tool name

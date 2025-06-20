@@ -123,7 +123,9 @@ func (r *VMFilesResource) Get(path string) (interface{}, error) {
 
 			perms := fields[0]
 			var itemSize int
-			fmt.Sscanf(fields[1], "%d", &itemSize)
+			if _, err := fmt.Sscanf(fields[1], "%d", &itemSize); err != nil {
+				itemSize = 0 // fallback if parse fails
+			}
 
 			// Get the name from the remaining fields
 			name := strings.Join(fields[5:], " ")

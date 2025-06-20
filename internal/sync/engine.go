@@ -104,7 +104,9 @@ func (e *Engine) ConfigureSync(config SyncConfig) error {
 	}
 
 	if watcher, exists := e.watchers[config.VMName]; exists {
-		watcher.Close()
+		if err := watcher.Close(); err != nil {
+			log.Error().Err(err).Msgf("Failed to close watcher for VM %s", config.VMName)
+		}
 		delete(e.watchers, config.VMName)
 	}
 
@@ -269,7 +271,9 @@ func (e *Engine) Close() {
 	}
 
 	for vmName, watcher := range e.watchers {
-		watcher.Close()
+		if err := watcher.Close(); err != nil {
+			log.Error().Err(err).Msgf("Failed to close watcher for VM %s", vmName)
+		}
 		delete(e.watchers, vmName)
 	}
 }
@@ -306,7 +310,9 @@ func (e *Engine) setupWatcher(config SyncConfig) error {
 		}
 		return nil
 	}); err != nil {
-		watcher.Close()
+		if err := watcher.Close(); err != nil {
+			log.Error().Err(err).Msg("Failed to close watcher after walk error")
+		}
 		return fmt.Errorf("failed to walk directory tree: %w", err)
 	}
 
@@ -328,10 +334,17 @@ func (e *Engine) setupWatcher(config SyncConfig) error {
 				}
 
 				// Skip excluded patterns
+				skipFile := false
 				for _, pattern := range config.ExcludePatterns {
-					if matched, _ := filepath.Match(pattern, filepath.Base(event.Name)); matched {
-						continue
+					match, _ := filepath.Match(pattern, filepath.Base(event.Name))
+					if match {
+						skipFile = true
+						break
 					}
+				}
+
+				if skipFile {
+					continue
 				}
 
 				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove) != 0 {
@@ -351,7 +364,9 @@ func (e *Engine) setupWatcher(config SyncConfig) error {
 
 					// Perform sync operation
 					if config.Direction == SyncToVM || config.Direction == SyncBidirectional {
-						e.SyncToVM(config.VMName, "")
+						if err := e.SyncToVM(config.VMName, ""); err != nil {
+							log.Error().Err(err).Msg("File watcher sync to VM failed")
+						}
 					}
 
 					changedFiles = make(map[string]bool)

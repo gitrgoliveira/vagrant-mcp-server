@@ -129,7 +129,9 @@ func (s *Server) Start(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		log.Info().Msg("Context canceled, stopping server")
-		s.Stop()
+		if err := s.Stop(); err != nil {
+			log.Error().Err(err).Msg("Failed to stop server")
+		}
 	}()
 
 	log.Info().Msg("Vagrant MCP Server started successfully")

@@ -30,7 +30,11 @@ func TestServer(t *testing.T) {
 	if err := srv.Start(ctx); err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}
-	defer srv.Stop()
+	defer func() {
+		if err := srv.Stop(); err != nil {
+			t.Errorf("Failed to stop server: %v", err)
+		}
+	}()
 
 	// Wait for server to fully initialize
 	time.Sleep(1 * time.Second)

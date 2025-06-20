@@ -58,6 +58,13 @@ func (e *Executor) ExecuteCommand(ctx context.Context, command string, execCtx E
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// SAFEGUARD: Prevent execution on host or without VM context
+	if execCtx.VMName == "" || strings.ToLower(execCtx.VMName) == "host" {
+		errMsg := "SECURITY VIOLATION: Attempted to execute a shell command outside of a VM context. All commands must target a Vagrant VM."
+		log.Error().Msg(errMsg)
+		return nil, fmt.Errorf("%s", errMsg)
+	}
+
 	// Check if VM exists and is running
 	state, err := e.vmManager.GetVMState(execCtx.VMName)
 	if err != nil {

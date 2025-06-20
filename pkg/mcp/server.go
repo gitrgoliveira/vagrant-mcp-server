@@ -183,13 +183,17 @@ func (s *Server) processStdio() {
 		default:
 			// Process the message
 			if err := s.handleMessage(scanner.Bytes()); err != nil {
-				s.writeError(os.Stdout, 0, err)
+				if err2 := s.writeError(os.Stdout, 0, err); err2 != nil {
+					fmt.Fprintf(os.Stderr, "Failed to write error: %v\n", err2)
+				}
 			}
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		s.writeError(os.Stdout, 0, fmt.Errorf("stdin scanning error: %w", err))
+		if err2 := s.writeError(os.Stdout, 0, fmt.Errorf("stdin scanning error: %w", err)); err2 != nil {
+			fmt.Fprintf(os.Stderr, "Failed to write error: %v\n", err2)
+		}
 	}
 }
 
@@ -346,7 +350,9 @@ func (s *Server) startSSETransport(capabilitiesJSON []byte) error {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 
 		// Send initial capabilities event
-		fmt.Fprintf(w, "event: initialize\ndata: %s\n\n", capabilitiesJSON)
+		if _, err := fmt.Fprintf(w, "event: initialize\ndata: %s\n\n", capabilitiesJSON); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to write SSE event: %v\n", err)
+		}
 
 		// Flush the response to ensure the client receives it immediately
 		if f, ok := w.(http.Flusher); ok {
@@ -362,7 +368,9 @@ func (s *Server) startSSETransport(capabilitiesJSON []byte) error {
 			}
 
 			if err := s.handleMessage(body); err != nil {
-				s.writeError(w, 0, err) // Use writer for SSE events
+				if err2 := s.writeError(w, 0, err); err2 != nil {
+					fmt.Fprintf(os.Stderr, "Failed to write SSE error: %v\n", err2)
+				}
 			}
 		}
 

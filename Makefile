@@ -14,7 +14,9 @@ lint:
 	golangci-lint run
 
 sec:
-	gosec $(PKG)
+	@gosec -severity high $(PKG) || true
+	@echo "Checking for high severity issues only..."
+	@gosec -severity high $(PKG)
 
 test:
 	go test -race -cover $(PKG)

@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,7 +14,11 @@ func TestCreateVM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Errorf("Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	// Create a test manager with the temp directory as base
 	manager := &Manager{
@@ -57,7 +62,7 @@ func TestCreateVM(t *testing.T) {
 	}
 
 	// Check if VM config was saved
-	configPath := filepath.Join(vmDir, "vm-config.json")
+	configPath := filepath.Join(filepath.Dir(tempDir), fmt.Sprintf("%s.json", vmName))
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		t.Errorf("VM config file was not created at %s", configPath)
 	}
