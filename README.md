@@ -44,6 +44,111 @@ The server can be configured using environment variables:
 - `MCP_TRANSPORT` - Transport type to use (stdio or sse, default: stdio)
 - `MCP_PORT` - Port to use for SSE transport (default: 3000)
 
+## VS Code Integration
+
+The Vagrant MCP Server can be used with Visual Studio Code to allow AI assistants to create and manage development VMs directly from your editor.
+
+### Prerequisites
+
+1. Make sure you've built the server as described in the Installation section
+2. Ensure Vagrant CLI and a virtualization provider are installed on your system
+3. Install Visual Studio Code
+
+### Steps to Install in VS Code
+
+1. **Configure VS Code Settings**
+
+   Add the following to your VS Code `settings.json` file (Command Palette > Preferences: Open User Settings (JSON)):
+
+   ```json
+   "mcp.connections": {
+     "vagrant": {
+       "command": "/path/to/vagrant-mcp-server/bin/vagrant-mcp-server",
+       "title": "Vagrant VMs",
+       "description": "Manage Vagrant development VMs",
+       "transport": "stdio"
+     }
+   }
+   ```
+
+   Replace `/path/to/vagrant-mcp-server` with the absolute path to your built server binary.
+
+2. **Restart VS Code**
+
+   Restart VS Code to apply the new MCP connection settings.
+
+3. **Using the MCP Server with VS Code AI Features**
+
+   Now AI assistants in VS Code will be able to:
+   - Create development VMs for your projects
+   - Execute commands inside VMs
+   - Synchronize files between your local system and VMs
+   - Install development tools and languages
+   - Manage VM lifecycle (start/stop/destroy)
+
+4. **Example Usage with AI Assistant**
+
+   You can ask the AI assistant questions like:
+   - "Create a development VM for this project"
+   - "Run the tests in a VM"
+   - "Install Node.js in the development VM"
+   - "Execute the application in the VM and forward port 3000"
+
+### Security Considerations
+
+When using the Vagrant MCP Server with VS Code:
+
+1. **Permissions**: The server runs with your user privileges and can:
+   - Create, modify, and delete files in your project directories
+   - Execute commands on your system through Vagrant
+   - Manage virtual machines on your behalf
+
+2. **Access Control**: 
+   - Only install this MCP Server on systems where you trust the AI assistant with the above permissions
+   - The server provides no authentication mechanisms itself - it relies on VS Code's security model
+   - Do not expose the SSE transport on public networks (if using SSE mode)
+
+3. **Data Handling**:
+   - Be cautious when syncing sensitive data between your host and VM
+   - Consider using sync exclusion patterns for confidential files
+
+4. **Resource Management**:
+   - Monitor resource usage of created VMs to prevent excessive consumption
+   - Always destroy VMs when they are no longer needed
+
+### Troubleshooting VS Code Integration
+
+If you encounter issues with the VS Code integration:
+
+1. **Check Server Logs**:
+   - Set the `LOG_LEVEL` environment variable to `debug` in your settings.json:
+     ```json
+     "mcp.connections": {
+       "vagrant": {
+         "command": "/path/to/vagrant-mcp-server/bin/vagrant-mcp-server",
+         "title": "Vagrant VMs",
+         "description": "Manage Vagrant development VMs",
+         "transport": "stdio",
+         "env": {
+           "LOG_LEVEL": "debug"
+         }
+       }
+     }
+     ```
+
+2. **Verify Vagrant Installation**:
+   - Run `vagrant --version` in your terminal to confirm Vagrant is properly installed
+   - Ensure your virtualization provider (VirtualBox, etc.) is working correctly
+
+3. **Check Paths**:
+   - Make sure the path to the server binary is correct in your settings.json
+   - Verify that project paths used with the server are valid and accessible
+
+4. **Common Issues**:
+   - "Vagrant is not installed" error: Add Vagrant to your PATH or specify the full path in your environment
+   - "Failed to create VM": Check your virtualization provider is running and properly configured
+   - Connection issues: Restart VS Code and check that the MCP server is correctly configured
+
 ## Usage
 
 ### MCP Tools
