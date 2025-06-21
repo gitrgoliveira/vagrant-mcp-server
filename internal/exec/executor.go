@@ -28,6 +28,7 @@ type VMManager interface {
 	ExecuteCommand(name string, cmd string, args []string, workingDir string) (string, string, int, error)
 	SyncToVM(name, source, target string) error
 	SyncFromVM(name, source, target string) error
+	UploadToVM(name, source, destination string, compress bool, compressionType string) error
 	GetSSHConfig(name string) (map[string]string, error)
 	GetVMConfig(name string) (vm.VMConfig, error)
 	UpdateVMConfig(name string, config vm.VMConfig) error

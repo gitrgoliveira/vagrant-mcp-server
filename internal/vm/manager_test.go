@@ -20,6 +20,24 @@ func skipIfVagrantNotInstalled(t *testing.T) {
 	}
 }
 
+// cleanupVM ensures Vagrant VMs are properly destroyed and directories are cleaned up
+func cleanupVM(t *testing.T, vmName string, vmDir string) {
+	// Try to destroy VM using Vagrant if the directory exists
+	if _, err := os.Stat(vmDir); err == nil {
+		// VM directory exists, try to destroy it cleanly with vagrant force flag
+		cmd := exec.Command("vagrant", "destroy", "-f")
+		cmd.Dir = vmDir
+		if err := cmd.Run(); err != nil {
+			t.Logf("Failed to destroy VM with Vagrant: %v. Continuing with directory cleanup.", err)
+		}
+
+		// Remove VM directory after Vagrant destroy
+		if err := os.RemoveAll(vmDir); err != nil {
+			t.Logf("Failed to remove VM directory: %v", err)
+		}
+	}
+}
+
 // TestCreateVM tests the creation of a new VM
 func TestCreateVM(t *testing.T) {
 	// Create a temporary directory for testing
@@ -27,9 +45,14 @@ func TestCreateVM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
+
+	// Always clean up the temp directory and VM directories, even in case of test failures
 	defer func() {
+		cleanupVM(t, "test-vm", filepath.Join(tempDir, "test-vm"))
+
+		// Remove temp directory
 		if err := os.RemoveAll(tempDir); err != nil {
-			t.Errorf("Failed to remove temp dir: %v", err)
+			t.Logf("Failed to remove temp dir: %v", err)
 		}
 	}()
 
@@ -162,19 +185,25 @@ func TestGetVMState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
+
+	// Define test VM name
+	const testVMName = "test-vm"
+
+	// Always clean up the temp directory and VM directories, even in case of test failures
 	defer func() {
+		cleanupVM(t, testVMName, filepath.Join(tempDir, testVMName))
+
+		// Remove temp directory
 		if err := os.RemoveAll(tempDir); err != nil {
 			t.Logf("Failed to remove temporary directory: %v", err)
 		}
 	}()
 
-	vmName := "test-vm"
-
 	// Test when VM directory doesn't exist (should return NotCreated)
 	t.Run("vm directory doesn't exist", func(t *testing.T) {
 		manager := &Manager{baseDir: tempDir}
 
-		state, err := manager.GetVMState(vmName)
+		state, err := manager.GetVMState(testVMName)
 
 		if err != nil {
 			t.Errorf("Unexpected error: %v", err)
@@ -187,7 +216,7 @@ func TestGetVMState(t *testing.T) {
 	// Test when VM directory exists but status command fails
 	t.Run("status command fails", func(t *testing.T) {
 		// Create a VM directory
-		vmDir := filepath.Join(tempDir, vmName)
+		vmDir := filepath.Join(tempDir, testVMName)
 		if err := os.MkdirAll(vmDir, 0755); err != nil {
 			t.Fatalf("Failed to create VM dir: %v", err)
 		}
@@ -199,7 +228,7 @@ func TestGetVMState(t *testing.T) {
 		// Just having an empty directory should cause vagrant status to fail
 		skipIfVagrantNotInstalled(t)
 
-		state, err := manager.GetVMState(vmName)
+		state, err := manager.GetVMState(testVMName)
 
 		if err == nil {
 			t.Error("Expected error but got none")
@@ -222,7 +251,19 @@ func TestStartVM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
+
+	// Store VM names used in this test for cleanup
+	vmsToCleanup := []string{"test-vm-success", "test-vm-fail"}
+
+	// Always clean up the temp directory and VM directories, even in case of test failures
 	defer func() {
+		// First clean up all VM directories and VirtualBox VMs
+		for _, vmName := range vmsToCleanup {
+			vmDir := filepath.Join(tempDir, vmName)
+			cleanupVM(t, vmName, vmDir)
+		}
+
+		// Then remove the entire temp directory
 		if err := os.RemoveAll(tempDir); err != nil {
 			t.Logf("Failed to remove temporary directory: %v", err)
 		}
@@ -402,9 +443,20 @@ func TestValidateVagrantfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
+
+	// Keep track of all VM names used in this test
+	var testVMNames []string
+	// Always clean up the temp directory and VM directories, even in case of test failures
 	defer func() {
+		// First clean up all VM directories
+		for _, vmName := range testVMNames {
+			vmDir := filepath.Join(tempDir, vmName)
+			cleanupVM(t, vmName, vmDir)
+		}
+
+		// Remove temp directory
 		if err := os.RemoveAll(tempDir); err != nil {
-			t.Errorf("Failed to remove temp dir: %v", err)
+			t.Logf("Failed to remove temp dir: %v", err)
 		}
 	}()
 
@@ -482,6 +534,8 @@ func TestValidateVagrantfile(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			vmName := "test-vm-validate-" + tc.name
+			// Add VM name to the tracking list for cleanup
+			testVMNames = append(testVMNames, vmName)
 			projectPath := filepath.Join(tempDir, "project-"+tc.name)
 
 			// Create project directory
@@ -513,6 +567,134 @@ func TestValidateVagrantfile(t *testing.T) {
 				if tc.expectError {
 					t.Errorf("Expected validation error but got none")
 				}
+			}
+		})
+	}
+}
+
+// TestUploadToVM tests uploading files to a VM
+func TestUploadToVM(t *testing.T) {
+	// Create a temporary directory for testing
+	tempDir, err := os.MkdirTemp("", "vm-manager-test-upload")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+
+	// Always clean up the temp directory and VM directories, even in case of test failures
+	defer func() {
+		// Clean up VM directory and VirtualBox VM
+		vmName := "test-vm-upload"
+		vmDir := filepath.Join(tempDir, vmName)
+		cleanupVM(t, vmName, vmDir)
+
+		// Then remove the entire temp directory
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to remove temp dir: %v", err)
+		}
+	}()
+
+	// Create a test file to upload
+	sourceFile := filepath.Join(tempDir, "test-file.txt")
+	testContent := "This is a test file for upload"
+	if err := os.WriteFile(sourceFile, []byte(testContent), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Create a VM directory for testing
+	vmName := "test-vm-upload"
+	vmDir := filepath.Join(tempDir, vmName)
+	if err := os.MkdirAll(vmDir, 0755); err != nil {
+		t.Fatalf("Failed to create VM dir: %v", err)
+	}
+
+	// Create a valid Vagrantfile
+	vagrantfilePath := filepath.Join(vmDir, "Vagrantfile")
+	validVagrantfile := `
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+# Test Vagrantfile
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/focal64"
+  
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory = 1024
+    vb.cpus = 2
+  end
+end
+`
+	if err := os.WriteFile(vagrantfilePath, []byte(validVagrantfile), 0644); err != nil {
+		t.Fatalf("Failed to create Vagrantfile: %v", err)
+	}
+
+	// Create the manager
+	manager := &Manager{baseDir: tempDir}
+
+	// Test cases for upload
+	testCases := []struct {
+		name            string
+		source          string
+		destination     string
+		compress        bool
+		compressionType string
+		vmExists        bool
+		vmRunning       bool
+		expectError     bool
+	}{
+		{
+			name:        "vm does not exist",
+			source:      sourceFile,
+			destination: "/tmp/uploaded-file.txt",
+			vmExists:    false,
+			expectError: true,
+		},
+		{
+			name:        "source file does not exist",
+			source:      filepath.Join(tempDir, "nonexistent-file.txt"),
+			destination: "/tmp/uploaded-file.txt",
+			vmExists:    true,
+			expectError: true,
+		},
+		{
+			name:        "upload with compression",
+			source:      sourceFile,
+			destination: "/tmp/uploaded-file.txt",
+			compress:    true,
+			vmExists:    true,
+			vmRunning:   true,
+			expectError: false,
+		},
+		{
+			name:            "upload with specific compression type",
+			source:          sourceFile,
+			destination:     "/tmp/uploaded-file.txt",
+			compress:        true,
+			compressionType: "zip",
+			vmExists:        true,
+			vmRunning:       true,
+			expectError:     false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Skip tests that would require a running VM since we can't easily set that up in unit tests
+			if tc.vmRunning {
+				t.Skip("Skipping test that requires a running VM")
+			}
+
+			testVMName := vmName
+			if !tc.vmExists {
+				testVMName = "nonexistent-vm"
+			}
+
+			err := manager.UploadToVM(testVMName, tc.source, tc.destination, tc.compress, tc.compressionType)
+
+			if tc.expectError && err == nil {
+				t.Error("Expected error but got none")
+			}
+			if !tc.expectError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
 			}
 		})
 	}

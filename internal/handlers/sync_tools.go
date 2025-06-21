@@ -43,6 +43,18 @@ func RegisterSyncTools(srv *server.MCPServer, vmManager exec.VMManager, syncEngi
 
 	srv.AddTool(syncFromVMTool, handleSyncFromVM(vmManager, syncEngine))
 
+	// Upload to VM tool
+	uploadToVMTool := mcp.NewTool("upload_to_vm",
+		mcp.WithDescription("Upload files from host to VM"),
+		mcp.WithString("vm_name", mcp.Required(), mcp.Description("Name of the development VM")),
+		mcp.WithString("source", mcp.Required(), mcp.Description("Source file or directory path on host")),
+		mcp.WithString("destination", mcp.Required(), mcp.Description("Destination path on VM")),
+		mcp.WithBoolean("compress", mcp.Description("Whether to compress the file before upload")),
+		mcp.WithString("compression_type", mcp.Description("Compression type to use (tgz, zip)")),
+	)
+
+	srv.AddTool(uploadToVMTool, handleUploadToVM(vmManager))
+
 	// Sync status tool
 	syncStatusTool := mcp.NewTool("sync_status",
 		mcp.WithDescription("Get sync status information"),
@@ -75,6 +87,18 @@ func RegisterSyncTools(srv *server.MCPServer, vmManager exec.VMManager, syncEngi
 	)
 
 	srv.AddTool(semanticSearchTool, handleSearchCode(vmManager, syncEngine))
+
+	// Upload to VM tool
+	uploadFileToVMTool := mcp.NewTool("upload_to_vm",
+		mcp.WithDescription("Upload files from host to VM"),
+		mcp.WithString("vm_name", mcp.Required(), mcp.Description("Name of the development VM")),
+		mcp.WithString("source", mcp.Required(), mcp.Description("Source file or directory on the host")),
+		mcp.WithString("destination", mcp.Required(), mcp.Description("Destination path in the VM")),
+		mcp.WithBoolean("compress", mcp.Description("Whether to compress the files during upload")),
+		mcp.WithString("compression_type", mcp.Description("Type of compression to use")),
+	)
+
+	srv.AddTool(uploadFileToVMTool, handleUploadToVM(vmManager))
 
 	log.Info().Msg("Sync tools registered")
 }
@@ -406,6 +430,63 @@ func handleSearchCode(manager exec.VMManager, syncEngine exec.SyncEngine) server
 		jsonData, err := json.Marshal(response)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal results: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(string(jsonData)), nil
+	}
+}
+
+// handleUploadToVM handles the upload_to_vm tool
+func handleUploadToVM(manager exec.VMManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		vmName, err := request.RequireString("vm_name")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Missing or invalid 'vm_name' parameter: %v", err)), nil
+		}
+
+		source, err := request.RequireString("source")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Missing or invalid 'source' parameter: %v", err)), nil
+		}
+
+		destination, err := request.RequireString("destination")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Missing or invalid 'destination' parameter: %v", err)), nil
+		}
+
+		// Optional parameters
+		compress := request.GetBool("compress", false)
+		compressionType := request.GetString("compression_type", "") // Default will be decided by vagrant
+
+		// Check VM state
+		state, err := manager.GetVMState(vmName)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' does not exist: %v", vmName, err)), nil
+		}
+
+		if state != vm.Running {
+			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' is not running (current state: %s)", vmName, state)), nil
+		}
+
+		// Upload file to VM
+		err = manager.UploadToVM(vmName, source, destination, compress, compressionType)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Upload to VM failed: %v", err)), nil
+		}
+
+		// Format the response
+		response := map[string]interface{}{
+			"status":      "success",
+			"vm_name":     vmName,
+			"source":      source,
+			"destination": destination,
+			"upload_time": time.Now().Format(time.RFC3339),
+		}
+
+		// Convert to JSON
+		jsonData, err := json.Marshal(response)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal result: %v", err)), nil
 		}
 
 		return mcp.NewToolResultText(string(jsonData)), nil

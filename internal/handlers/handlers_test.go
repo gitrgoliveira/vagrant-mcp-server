@@ -44,6 +44,9 @@ func (m *mockVMManager) ExecuteCommand(name string, cmd string, args []string, w
 }
 func (m *mockVMManager) SyncToVM(name, source, target string) error   { return nil }
 func (m *mockVMManager) SyncFromVM(name, source, target string) error { return nil }
+func (m *mockVMManager) UploadToVM(name, source, destination string, compress bool, compressionType string) error {
+	return nil
+}
 func (m *mockVMManager) GetSSHConfig(name string) (map[string]string, error) {
 	return map[string]string{}, nil
 }

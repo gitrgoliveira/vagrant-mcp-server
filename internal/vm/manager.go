@@ -107,7 +107,7 @@ func (m *Manager) DestroyVM(name string) error {
 	vmDir := m.getVMDir(name)
 
 	// Run vagrant destroy
-	cmd := exec.Command("vagrant", "destroy", "-f")
+	cmd := exec.Command("vagrant", "destroy")
 	cmd.Dir = vmDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -383,4 +383,60 @@ func (m *Manager) parseSSHConfig(output string) (map[string]string, error) {
 	}
 
 	return config, nil
+}
+
+// UploadToVM uploads a file or directory to the VM using vagrant upload
+func (m *Manager) UploadToVM(name string, source string, destination string, compress bool, compressionType string) error {
+	// Validate VM exists
+	vmDir := m.getVMDir(name)
+	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
+		return fmt.Errorf("VM '%s' does not exist", name)
+	}
+
+	// Get VM state
+	state, err := m.GetVMState(name)
+	if err != nil {
+		return fmt.Errorf("failed to get VM state: %w", err)
+	}
+
+	// Check if VM is running
+	if state != Running {
+		return fmt.Errorf("VM is not running (current state: %s)", state)
+	}
+
+	// Validate source exists
+	if _, err := os.Stat(source); os.IsNotExist(err) {
+		return fmt.Errorf("source path does not exist: %s", source)
+	}
+
+	// Prepare vagrant upload command
+	args := []string{"upload"}
+
+	if compress {
+		args = append(args, "--compress")
+		if compressionType != "" {
+			args = append(args, "--compression-type", compressionType)
+		}
+	}
+
+	// Add source and destination args
+	args = append(args, source, destination)
+
+	// Execute the command
+	cmd := exec.Command("vagrant", args...)
+	cmd.Dir = vmDir
+
+	log.Debug().Str("vm", name).Str("source", source).Str("destination", destination).
+		Bool("compress", compress).Str("compression", compressionType).
+		Msg("Uploading file to VM")
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("upload failed: %w: %s", err, output)
+	}
+
+	log.Info().Str("vm", name).Str("source", source).Str("destination", destination).
+		Msg("File uploaded to VM successfully")
+
+	return nil
 }

@@ -199,6 +199,14 @@ If you encounter issues with the VS Code integration:
   - Parameters:
     - `vm_name` (string): Name of the VM
     - `path` (string, optional): Path to sync (default: all paths)
+    
+- `upload_to_vm`: Upload files from host to VM
+  - Parameters:
+    - `vm_name` (string): Name of the VM
+    - `source` (string): Source file or directory path on host
+    - `destination` (string): Destination path on VM
+    - `compress` (boolean, optional): Whether to compress the file before upload
+    - `compression_type` (string, optional): Compression type to use (tgz or zip)
 
 #### Environment Setup
 

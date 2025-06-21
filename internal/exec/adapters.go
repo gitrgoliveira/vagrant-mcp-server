@@ -24,6 +24,9 @@ func (a *VMManagerAdapter) DestroyVM(name string) error                  { retur
 func (a *VMManagerAdapter) GetVMState(name string) (vm.State, error)     { return a.Real.GetVMState(name) }
 func (a *VMManagerAdapter) SyncToVM(name, source, target string) error   { return nil }
 func (a *VMManagerAdapter) SyncFromVM(name, source, target string) error { return nil }
+func (a *VMManagerAdapter) UploadToVM(name, source, destination string, compress bool, compressionType string) error {
+	return a.Real.UploadToVM(name, source, destination, compress, compressionType)
+}
 func (a *VMManagerAdapter) GetSSHConfig(name string) (map[string]string, error) {
 	return a.Real.GetSSHConfig(name)
 }

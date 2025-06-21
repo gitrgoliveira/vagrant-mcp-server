@@ -97,6 +97,10 @@ func (m *mockVMManager) UpdateVMConfig(name string, config vm.VMConfig) error {
 	return nil
 }
 
+func (m *mockVMManager) UploadToVM(name, source, destination string, compress bool, compressionType string) error {
+	return nil
+}
+
 type mockSyncEngine struct {
 	registerVM   func(vmName string) error
 	unregisterVM func(vmName string) error
