@@ -11,6 +11,18 @@ A Model Context Protocol (MCP) Server implementation for HashiCorp Vagrant that 
 - **File System Synchronization:** Configure sync methods, monitor sync status, and resolve conflicts
 - **Development Environment Setup:** Install language runtimes, tools, and dependencies
 
+## System Requirements
+
+- **Vagrant CLI:** The Vagrant command line interface must be installed and available in your PATH
+- **Virtualization Provider:** A supported virtualization provider (e.g., VirtualBox, VMware, Hyper-V, or libvirt)
+- **Go 1.18+:** Required for building from source
+
+You can verify that Vagrant is installed correctly by running:
+
+```bash
+vagrant --version
+```
+
 ## Installation
 
 ```bash
@@ -138,6 +150,17 @@ The server can be configured using environment variables:
 
 ## Development
 
+### Prerequisites
+
+1. **Go 1.18 or higher**
+2. **Vagrant CLI** - Required for both running the server and tests
+   - All tests use the real Vagrant CLI for validation
+   - Tests requiring Vagrant will be skipped if Vagrant is not installed
+   - Some tests that require a full VM environment may be skipped in CI
+3. **A supported virtualization provider** - VirtualBox is recommended for development
+
+### Common Tasks
+
 ```bash
 # Format code
 go fmt ./...
@@ -145,10 +168,10 @@ go fmt ./...
 # Lint code
 make lint
 
-# Run unit tests
+# Run unit tests (requires Vagrant CLI installed)
 make test
 
-# Run integration tests
+# Run integration tests (requires Vagrant CLI and a virtualization provider)
 make integration
 
 # Security checks

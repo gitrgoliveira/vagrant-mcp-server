@@ -9,37 +9,10 @@ import (
 	"strings"
 
 	"github.com/rs/zerolog/log"
+	"github.com/vagrant-mcp/server/internal/utils"
 )
 
-// State represents the state of a Vagrant VM
-type State string
-
-const (
-	StateNotCreated State = "not_created"
-	StateRunning    State = "running"
-	StateStopped    State = "stopped"
-	StateSuspended  State = "suspended"
-	StateError      State = "error"
-)
-
-// VMConfig represents the configuration for a Vagrant VM
-type VMConfig struct {
-	Name         string   `json:"name"`
-	Box          string   `json:"box"`
-	CPU          int      `json:"cpu"`
-	Memory       int      `json:"memory"`
-	SyncType     string   `json:"sync_type"`
-	ProjectPath  string   `json:"project_path"`
-	Ports        []Port   `json:"ports"`
-	Environment  []string `json:"environment"`
-	Provisioners []string `json:"provisioners"`
-}
-
-// Port represents a port forwarding rule
-type Port struct {
-	Guest int `json:"guest"`
-	Host  int `json:"host"`
-}
+// Manager represents the configuration for a Vagrant VM Manager
 
 // Manager handles VM lifecycle operations
 type Manager struct {
@@ -48,6 +21,11 @@ type Manager struct {
 
 // NewManager creates a new VM manager
 func NewManager() (*Manager, error) {
+	// Check if Vagrant CLI is installed
+	if err := utils.CheckVagrantInstalled(); err != nil {
+		return nil, fmt.Errorf("failed to initialize VM manager: %w", err)
+	}
+
 	// Get base directory from environment or use default
 	baseDir := os.Getenv("VM_BASE_DIR")
 	if baseDir == "" {
@@ -158,7 +136,7 @@ func (m *Manager) GetVMState(name string) (State, error) {
 
 	// Check if VM directory exists
 	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
-		return StateNotCreated, nil
+		return NotCreated, nil
 	}
 
 	// Run vagrant status
@@ -166,7 +144,7 @@ func (m *Manager) GetVMState(name string) (State, error) {
 	cmd.Dir = vmDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return StateError, fmt.Errorf("failed to get VM status: %w", err)
+		return Error, fmt.Errorf("failed to get VM status: %w", err)
 	}
 
 	// Parse status output
@@ -206,6 +184,31 @@ func (m *Manager) GetSSHConfig(name string) (map[string]string, error) {
 	return m.parseSSHConfig(string(output))
 }
 
+// UpdateVMConfig updates the configuration for a VM
+func (m *Manager) UpdateVMConfig(name string, config VMConfig) error {
+	log.Debug().Str("vm", name).Msg("Updating VM configuration")
+
+	// Ensure VM directory exists
+	vmDir := filepath.Join(m.baseDir, name)
+	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
+		return fmt.Errorf("VM directory does not exist: %s", vmDir)
+	}
+
+	// Update config file
+	configPath := filepath.Join(vmDir, "config.json")
+	configData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal VM config: %w", err)
+	}
+
+	if err := os.WriteFile(configPath, configData, 0644); err != nil {
+		return fmt.Errorf("failed to write VM config: %w", err)
+	}
+
+	log.Info().Str("vm", name).Msg("VM configuration updated")
+	return nil
+}
+
 // Close cleans up resources used by the VM manager
 func (m *Manager) Close() {
 	// Nothing to clean up currently
@@ -232,7 +235,9 @@ func (m *Manager) saveVMConfig(name string, config VMConfig) error {
 	return os.WriteFile(configFile, data, 0644)
 }
 
-// generateVagrantfile creates a Vagrantfile for the VM
+// generateVagrantfile creates a Vagrantfile for the VM and validates it
+// TODO: Consider using the Go embed package with external template files for better maintainability
+// The template was previously stored in templates/Vagrantfile.template but is now inlined here
 func (m *Manager) generateVagrantfile(name string, config VMConfig) error {
 	vagrantfile := `# -*- mode: ruby -*-
 # vi: set ft=ruby :
@@ -317,8 +322,22 @@ end`
 		envSetup)      // Environment setup
 
 	// Write the Vagrantfile
-	vagrantfilePath := filepath.Join(m.getVMDir(name), "Vagrantfile")
-	return os.WriteFile(vagrantfilePath, []byte(content), 0644)
+	vmDir := m.getVMDir(name)
+	vagrantfilePath := filepath.Join(vmDir, "Vagrantfile")
+	if err := os.WriteFile(vagrantfilePath, []byte(content), 0644); err != nil {
+		return err
+	}
+
+	// Always validate the Vagrantfile to ensure it's correct
+	cmd := exec.Command("vagrant", "validate")
+	cmd.Dir = vmDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("vagrantfile validation failed: %w, output: %s", err, output)
+	}
+	log.Info().Str("name", name).Msg("Vagrantfile validated successfully")
+
+	return nil
 }
 
 // parseVagrantStatus parses the output of 'vagrant status --machine-readable'
@@ -330,18 +349,18 @@ func (m *Manager) parseVagrantStatus(output string) (State, error) {
 		if len(parts) >= 4 && parts[2] == "state" {
 			switch parts[3] {
 			case "running":
-				return StateRunning, nil
+				return Running, nil
 			case "poweroff", "aborted":
-				return StateStopped, nil
+				return Stopped, nil
 			case "saved":
-				return StateSuspended, nil
+				return Suspended, nil
 			case "not_created":
-				return StateNotCreated, nil
+				return NotCreated, nil
 			}
 		}
 	}
 
-	return StateError, fmt.Errorf("could not determine VM state")
+	return Error, fmt.Errorf("could not determine VM state")
 }
 
 // parseSSHConfig parses the output of 'vagrant ssh-config'

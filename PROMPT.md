@@ -5,22 +5,22 @@ Create a complete Model Context Protocol (MCP) Server implementation for HashiCo
 ## Requirements
 
 ### Core MCP Server Structure
-- Implement using Go with proper MCP protocol implementation
-- Follow MCP specification for server initialization, capabilities, and communication
-- Include proper error handling, logging, and validation
-- Support both stdio and SSE transport protocols
-- Use Go's native JSON-RPC 2.0 capabilities for MCP communication
+- Implement using Go with the MCP-go library (github.com/mark3labs/mcp-go)
+- Leverage MCP-go's server lifecycle, capabilities, and communication patterns
+- Include comprehensive error handling, structured logging, and validation
+- Support both stdio and SSE transport protocols as provided by MCP-go
+- Ensure all code compiles, tests pass, and linting succeeds (using `make all`)
+- Remove any legacy code and completely implement all functions
 
 ### Reference Documentation
 Before implementation, review these key documentation sections:
 
 **MCP Protocol Specification:**
-- #fetch https://spec.modelcontextprotocol.io/specification/ - Core MCP specification
-- #fetch https://spec.modelcontextprotocol.io/specification/server/ - MCP server implementation guide
-- #fetch https://spec.modelcontextprotocol.io/specification/basic/tools/ - MCP tools specification
-- #fetch https://spec.modelcontextprotocol.io/specification/basic/resources/ - MCP resources specification
-- #fetch https://spec.modelcontextprotocol.io/specification/basic/prompts/ - MCP prompts specification
-- #fetch https://spec.modelcontextprotocol.io/specification/transports/ - MCP transport protocols
+- #fetch https://github.com/mark3labs/mcp-go - Main implementation library to use
+- #fetch https://github.com/mark3labs/mcp-go/blob/main/www/docs/pages/servers/index.mdx - MCP-go documentation for servers
+- #fetch https://github.com/mark3labs/mcp-go/blob/main/www/docs/pages/servers/tools.mdx - MCP-go tools implementation
+- #fetch https://github.com/mark3labs/mcp-go/blob/main/www/docs/pages/servers/resources.mdx - MCP-go resources implementation
+- #fetch https://github.com/mark3labs/mcp-go/blob/main/www/docs/pages/servers/advanced.mdx - MCP-go hooks and middleware
 
 **Vagrant Documentation:**
 - #fetch https://developer.hashicorp.com/vagrant/docs/vagrantfile - Vagrantfile configuration
@@ -31,7 +31,7 @@ Before implementation, review these key documentation sections:
 - #fetch https://developer.hashicorp.com/vagrant/docs/providers - Provider-specific configurations
 
 ### Core Development VM Tools
-Create MCP tools specifically designed for development workflow:
+Create MCP tools using MCP-go's tool definition patterns specifically designed for development workflow:
 
 **Development VM Management:**
 - `create_dev_vm` - Create and configure a development VM with:
@@ -160,83 +160,87 @@ Provide comprehensive access to development VM state and configuration:
 
 ## Project Structure
 ```
-dev-vm-mcp-server/
+vagrant-mcp-server/
 ├── cmd/
 │   └── server/
-│       └── main.go           # Main server entry point
+│       └── main.go           # Main server entry point with MCP-go integration
 ├── internal/
-│   ├── mcp/                  # MCP protocol implementation
-│   │   ├── server.go         # Core MCP server
-│   │   ├── tools.go          # Tool implementations
-│   │   ├── resources.go      # Resource implementations
-│   │   └── transport.go      # Transport layer (stdio/SSE)
+│   ├── handlers/             # MCP tool and resource handlers
+│   │   ├── vm_tools.go       # VM management tool handlers
+│   │   ├── exec_tools.go     # Command execution tool handlers
+│   │   ├── sync_tools.go     # Synchronization tool handlers
+│   │   └── env_tools.go      # Environment setup tool handlers 
 │   ├── vm/                   # VM management and lifecycle
 │   │   ├── manager.go        # Development VM manager
-│   │   ├── provisioner.go    # VM provisioning logic
-│   │   └── config.go         # Vagrantfile generation
+│   │   ├── types.go          # VM type definitions
+│   │   └── accessors.go      # VM state access methods
 │   ├── sync/                 # File synchronization
 │   │   ├── engine.go         # Core sync logic
-│   │   ├── watcher.go        # File system watchers
-│   │   └── resolver.go       # Sync conflict handling
+│   │   └── errors.go         # Sync-specific error definitions
 │   ├── exec/                 # Command execution
-│   │   ├── executor.go       # VM command execution
-│   │   ├── stream.go         # Output streaming
-│   │   └── context.go        # Execution context management
-│   └── utils/                # Utility functions
+│   │   └── executor.go       # VM command execution with sync
+│   └── resources/            # MCP resource implementations
+│       ├── resources.go      # Resource handler implementation
+│       └── resources-mcp-go.go # MCP-go specific resource adapters
 ├── pkg/
-│   └── types/                # Public type definitions
+│   └── mcp/                  # Public MCP interface
+│       ├── types.go          # Public type definitions
+│       └── server.go         # Server configuration
 ├── templates/                # Vagrantfile and provisioning templates
-├── go.mod
+├── go.mod                    # With github.com/mark3labs/mcp-go dependency
 ├── go.sum
 └── README.md
 ```
 
 ## Deliverables
-1. Complete Go-based MCP server implementation focused on development VM management
-2. Native Go MCP protocol implementation with JSON-RPC 2.0 support
-3. Comprehensive synchronized command execution system
-4. Robust filesystem synchronization with conflict resolution
-5. Development environment templates and provisioning scripts
-6. Real-time sync monitoring and status reporting
-7. Unit and integration tests for VM lifecycle and sync operations
-8. Performance benchmarks for sync operations and command execution
-9. Documentation including development workflow examples and Go API reference
+1. Complete MCP server implementation using MCP-go library, focused on development VM management
+2. Full implementation of all required functionality with no legacy code or TODOs remaining
+3. Comprehensive synchronized command execution system integrated with MCP-go tools
+4. Robust filesystem synchronization with conflict resolution leveraging MCP-go resources
+5. Development environment templates and provisioning scripts for Vagrant
+6. Real-time sync monitoring and status reporting via MCP-go notification capabilities
+7. Unit and integration tests with high coverage for VM lifecycle and sync operations
+8. All tests and linting passing with `make all` command
+9. Documentation including development workflow examples for MCP-go server integration
 10. Configuration templates for popular development stacks
 11. Docker containerization support for the MCP server
 12. Cross-platform binary compilation (Linux, macOS, Windows)
 
 ## Go-Specific Implementation Requirements
-- Use Go's `context` package for proper cancellation and timeout handling
+- Use MCP-go's context handling and hooks system for proper lifecycle management
+- Leverage MCP-go's server structure and tool handler patterns
 - Implement proper goroutine management for concurrent operations
 - Use channels for communication between sync, exec, and VM management components
 - Leverage Go's `os/exec` package for Vagrant CLI interactions
-- Use `fsnotify` package for filesystem watching
-- Implement structured logging with `slog` package
 - Use `embed` package for Vagrantfile templates
-- Proper error handling with custom error types
+- Implement proper error handling with consistent error types and status codes
+- Ensure all code passes Go linting standards (run with `make lint`)
+- Complete all TODOs and implement all required functions
 - Configuration management with environment variables and config files
 
 ## Testing Requirements
-- Unit tests using Go's built-in `testing` package
+- Unit tests using Go's built-in `testing` package and MCP-go test utilities
 - Mock Vagrant operations using interfaces and dependency injection
 - Integration tests with real development workflows using `testify` suite
-- Filesystem sync stress testing with large codebases
-- Command execution testing with long-running processes using context cancellation
+- Comprehensive test coverage of all major components
+- Command execution testing with proper context cancellation handling
 - Sync conflict simulation and resolution testing
-- Performance testing and benchmarking with `testing.B`
+- All tests must pass when running `make test`
 - Multi-platform testing (Windows, macOS, Linux hosts)
 - Race condition testing with `go test -race`
 - Memory leak detection with runtime profiling
 
 ## Key Implementation Notes
-- **MCP Protocol**: Implement JSON-RPC 2.0 over stdio transport as primary method, with SSE as secondary
+- **MCP-go Integration**: Use MCP-go library for all MCP protocol handling and server lifecycle management
+- **MCP Tool Definition**: Define tools using MCP-go's tool definition patterns with proper argument validation
 - **Command Execution Flow**: Always sync files before command execution, execute in VM, then sync results back
 - **Sync Optimization**: Use rsync with efficient delta transfers, exclude build artifacts and dependencies
-- **Error Recovery**: Implement robust error handling for sync failures and VM connectivity issues
-- **State Persistence**: Maintain VM state and sync status using JSON files or embedded database
+- **Error Recovery**: Implement robust error handling for sync failures and VM connectivity issues using MCP-go error patterns
+- **State Persistence**: Use MCP-go's session management capabilities along with local state management
 - **Security**: Validate all file paths and command parameters to prevent security issues
-- **Go Concurrency**: Use goroutines and channels for non-blocking operations, proper context cancellation
+- **Go Concurrency**: Use goroutines and channels with MCP-go's context handling for robust operations
 - **Cross-platform**: Handle path separators, line endings, and platform-specific Vagrant behaviors
-- **Memory Management**: Efficient handling of large file operations and command output streaming
+- **Code Quality**: Ensure all code compiles, passes tests, and meets linting standards with `make all`
+- **Complete Implementation**: Remove all TODOs and fully implement all required functionality
 
-The Go-based MCP server should enable AI agents to seamlessly work with code in a development VM as if it were local, with transparent file synchronization and reliable command execution, leveraging Go's strengths in concurrency, performance, and cross-platform deployment.
+The MCP-go based server should enable AI agents to seamlessly work with code in a development VM as if it were local, with transparent file synchronization and reliable command execution. By leveraging the MCP-go library, the implementation should be robust, maintainable, and fully compliant with the MCP specification. The final code must compile successfully, pass all tests and linting checks with `make all`, have no TODOs or legacy code, and fully implement all required functionality.

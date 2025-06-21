@@ -3,7 +3,7 @@
 APP_NAME = vagrant-mcp-server
 PKG = ./...
 
-.PHONY: all test lint fmt sec build integration clean
+.PHONY: all test test-ci lint fmt sec build integration clean check-vagrant
 
 all: fmt lint sec test build
 
@@ -18,10 +18,19 @@ sec:
 	@echo "Checking for high severity issues only..."
 	@gosec -severity high $(PKG)
 
-test:
+# Check if Vagrant is installed
+check-vagrant:
+	@echo "Checking if Vagrant CLI is installed..."
+	@vagrant --version >/dev/null 2>&1 || (echo "Error: Vagrant CLI is not installed or not in your PATH. Please install Vagrant: https://www.vagrantup.com/downloads" && exit 1)
+	@echo "✓ Vagrant CLI is installed."
+
+# Run tests with Vagrant validation
+test: check-vagrant
+	@echo "Running tests..."
 	go test -race -cover $(PKG)
 
-integration:
+integration: check-vagrant
+	@echo "Running integration tests..."
 	INTEGRATION_TESTS=1 go test -v ./cmd/server
 
 build:

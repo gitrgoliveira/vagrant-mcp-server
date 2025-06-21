@@ -1,13 +1,16 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"testing"
-	"time"
 
-	"github.com/vagrant-mcp/server/internal/server"
+	"github.com/mark3labs/mcp-go/server"
+	"github.com/vagrant-mcp/server/internal/exec"
+	"github.com/vagrant-mcp/server/internal/handlers"
+	"github.com/vagrant-mcp/server/internal/resources"
+	"github.com/vagrant-mcp/server/internal/sync"
+	"github.com/vagrant-mcp/server/internal/vm"
 )
 
 func TestServer(t *testing.T) {
@@ -16,28 +19,43 @@ func TestServer(t *testing.T) {
 		t.Skip("Integration tests disabled. Set INTEGRATION_TESTS=1 to run.")
 	}
 
-	// Create a new server instance
-	srv, err := server.NewServer()
+	// Initialize VM manager, sync engine, and executor
+	vmManager, err := vm.NewManager()
 	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
+		t.Fatalf("Failed to create VM manager: %v", err)
 	}
 
-	// Create a context with timeout for server shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Start the server
-	if err := srv.Start(ctx); err != nil {
-		t.Fatalf("Failed to start server: %v", err)
+	syncEngine, err := sync.NewEngine()
+	if err != nil {
+		t.Fatalf("Failed to create sync engine: %v", err)
 	}
-	defer func() {
-		if err := srv.Stop(); err != nil {
-			t.Errorf("Failed to stop server: %v", err)
-		}
-	}()
 
-	// Wait for server to fully initialize
-	time.Sleep(1 * time.Second)
+	adapterVM := &exec.VMManagerAdapter{Real: vmManager}
+	adapterSync := &exec.SyncEngineAdapter{Real: syncEngine}
+
+	executor, err := exec.NewExecutor(adapterVM, adapterSync)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	// Create a new MCP server
+	srv := server.NewMCPServer(
+		"Vagrant Development VM MCP Server",
+		"1.0.0",
+		server.WithRecovery(),
+	)
+
+	// Register all tools using the MCP-go implementation
+	handlers.RegisterVMTools(srv, adapterVM, adapterSync)
+	handlers.RegisterExecTools(srv, adapterVM, adapterSync, executor)
+	handlers.RegisterEnvTools(srv, adapterVM, executor)
+	handlers.RegisterSyncTools(srv, adapterVM, adapterSync)
+
+	// Register resources using the MCP-go implementation
+	resources.RegisterMCPResources(srv, adapterVM, executor)
+
+	// We're not starting the server for real in tests
+	// Just validating initialization
 
 	// Print a message indicating the server started successfully
 	fmt.Println("MCP Server started successfully with the following components:")

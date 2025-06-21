@@ -1,14 +1,17 @@
 package main
 
 import (
-	"context"
 	"os"
-	"os/signal"
-	"syscall"
 
+	"github.com/mark3labs/mcp-go/server"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/vagrant-mcp/server/internal/server"
+	"github.com/vagrant-mcp/server/internal/exec"
+	"github.com/vagrant-mcp/server/internal/handlers"
+	"github.com/vagrant-mcp/server/internal/resources"
+	"github.com/vagrant-mcp/server/internal/sync"
+	"github.com/vagrant-mcp/server/internal/utils"
+	"github.com/vagrant-mcp/server/internal/vm"
 )
 
 func main() {
@@ -30,32 +33,77 @@ func main() {
 
 	log.Info().Msg("Starting Vagrant MCP Server")
 
-	// Create server with cancellable context
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Check if Vagrant CLI is installed
+	if err := utils.CheckVagrantInstalled(); err != nil {
+		log.Fatal().Err(err).Msg("Vagrant CLI is required to run this server")
+	}
+	log.Info().Msg("Vagrant CLI detected")
 
-	// Initialize the server
-	srv, err := server.NewServer()
+	// Initialize VM manager, sync engine, and executor
+	vmManager, err := vm.NewManager()
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to create server")
+		log.Fatal().Err(err).Msg("Failed to create VM manager")
 	}
 
-	// Start the server
-	if err := srv.Start(ctx); err != nil {
-		log.Fatal().Err(err).Msg("Failed to start server")
+	syncEngine, err := sync.NewEngine()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to create sync engine")
 	}
 
-	// Handle graceful shutdown
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	adapterVM := &exec.VMManagerAdapter{Real: vmManager}
+	adapterSync := &exec.SyncEngineAdapter{Real: syncEngine}
 
-	go func() {
-		sig := <-sigs
-		log.Info().Msgf("Received signal %v, shutting down...", sig)
-		cancel()
-	}()
+	executor, err := exec.NewExecutor(adapterVM, adapterSync)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to create executor")
+	}
 
-	// Wait for server to complete
-	<-srv.Done()
+	// Create a new MCP server with recovery middleware
+	srv := server.NewMCPServer(
+		"Vagrant Development VM MCP Server",
+		"1.0.0",
+		server.WithRecovery(),
+	)
+
+	// Register all tools using the MCP-go implementation
+	handlers.RegisterVMTools(srv, adapterVM, adapterSync)
+	handlers.RegisterExecTools(srv, adapterVM, adapterSync, executor)
+	handlers.RegisterEnvTools(srv, adapterVM, executor)
+	handlers.RegisterSyncTools(srv, adapterVM, adapterSync)
+
+	// Register resources using the MCP-go implementation
+	resources.RegisterMCPResources(srv, adapterVM, executor)
+
+	// Determine which transport to use
+	transportType := os.Getenv("MCP_TRANSPORT")
+	if transportType == "" {
+		transportType = "stdio" // Default to stdio if not specified
+	}
+
+	log.Info().Str("transport", transportType).Msg("Vagrant MCP Server starting")
+
+	// Start the server with the selected transport
+	switch transportType {
+	case "stdio":
+		// Start with stdio transport
+		log.Info().Msg("Starting with STDIO transport")
+		if err := server.ServeStdio(srv); err != nil {
+			log.Fatal().Err(err).Msg("STDIO server error")
+		}
+	case "sse":
+		// Start with SSE transport
+		port := os.Getenv("MCP_PORT")
+		if port == "" {
+			port = "8080" // Default port
+		}
+		log.Info().Str("port", port).Msg("Starting with SSE transport")
+		sseServer := server.NewSSEServer(srv)
+		if err := sseServer.Start(":" + port); err != nil {
+			log.Fatal().Err(err).Msg("SSE server error")
+		}
+	default:
+		log.Fatal().Str("transport", transportType).Msg("Unsupported transport type")
+	}
+
 	log.Info().Msg("Vagrant MCP Server shutdown complete")
 }
