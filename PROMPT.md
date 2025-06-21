@@ -220,7 +220,6 @@ vagrant-mcp-server/
 
 ## Testing Requirements
 - Unit tests using Go's built-in `testing` package and MCP-go test utilities
-- Mock Vagrant operations using interfaces and dependency injection
 - Integration tests with real development workflows using `testify` suite
 - Comprehensive test coverage of all major components
 - Command execution testing with proper context cancellation handling
