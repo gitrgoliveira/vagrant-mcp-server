@@ -12,7 +12,7 @@ GO_VERSION ?= $(shell go version | cut -d' ' -f3)
 # Linker flags for version injection
 LDFLAGS = -ldflags "-X main.Version=$(VERSION) -X main.GitCommit=$(GIT_COMMIT) -X main.BuildTime=$(BUILD_TIME) -X main.GoVersion=$(GO_VERSION) -w -s"
 
-.PHONY: all test test-integration test-vm-start lint fmt sec build clean check-vagrant help-test
+.PHONY: all test test-integration test-vm-start lint fmt sec build clean check-vagrant help-test help
 
 all: fmt lint sec test build
 
@@ -85,3 +85,35 @@ release: clean fmt lint sec test
 	cd $(RELEASE_DIR) && shasum -a 256 $(APP_NAME)-* > checksums.txt
 	cd dist && tar -czvf $(APP_NAME)-$(RELEASE_VERSION).tar.gz $(APP_NAME)-$(RELEASE_VERSION)
 	@echo "Release created at dist/$(APP_NAME)-$(RELEASE_VERSION).tar.gz"
+
+# Show all available targets
+help:
+	@echo "Vagrant MCP Server - Available Make Targets"
+	@echo ""
+	@echo "Development:"
+	@echo "  make build          - Build the server binary"
+	@echo "  make fmt            - Format Go code"
+	@echo "  make lint           - Run linter"
+	@echo "  make sec            - Run security scanner"
+	@echo "  make all            - Run fmt, lint, sec, test, and build"
+	@echo ""
+	@echo "Testing:"
+	@echo "  make test           - Fast unit tests (no VMs created)"
+	@echo "  make test-integration - Integration tests (creates but doesn't start VMs)"
+	@echo "  make test-vm-start  - Full VM tests (starts actual VMs - very slow)"
+	@echo "  make help-test      - Show detailed test information"
+	@echo ""
+	@echo "Release:"
+	@echo "  make release        - Build cross-platform release binaries"
+	@echo "  make clean          - Clean build artifacts"
+	@echo ""
+	@echo "GitHub Release Process:"
+	@echo "  git tag v1.0.0      - Create a release tag"
+	@echo "  git push origin v1.0.0 - Push tag to trigger automated release"
+	@echo ""
+	@echo "Tools:"
+	@echo "  make tools          - Install required development tools"
+	@echo "  make check-vagrant  - Verify Vagrant CLI is installed"
+	@echo "  make help           - Show this help message"
+	@echo ""
+	@echo "Current version: $(VERSION)"
