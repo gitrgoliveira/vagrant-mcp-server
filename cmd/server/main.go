@@ -25,8 +25,8 @@ var (
 )
 
 const (
-	Author  = "Vagrant MCP Server Team"
-	Contact = "support@vagrant-mcp-server.dev"
+	Author  = "Ricardo Oliveira"
+	Contact = "https://github.com/gitrgoliveira/"
 )
 
 func main() {
