@@ -1,5 +1,8 @@
 # Vagrant MCP Server (Go Implementation)
 
+> [!CAUTION]
+> This is work in progress and not yet ready for use.
+
 A Model Context Protocol (MCP) Server implementation for HashiCorp Vagrant that provides AI agents with the ability to create and manage development VMs with synchronized filesystems and seamless command execution capabilities.
 
 > **Note:** This server must be run directly on the host where Vagrant and your virtualization provider (e.g., VirtualBox, libvirt) are installed. Running inside Docker is not supported, as the server needs direct access to the Vagrant CLI, virtualization drivers, and your project files.
