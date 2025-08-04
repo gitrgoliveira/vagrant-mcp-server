@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  CI: 'true'
+  GITHUB_ACTIONS: 'true'
+
 jobs:
   lint-test-build:
     name: Lint, Test & Build
@@ -28,15 +32,36 @@ jobs:
       run: |
         make tools
 
+    - name: Verify CI environment variables
+      run: |
+        echo "CI environment variable: $CI"
+        echo "GITHUB_ACTIONS environment variable: $GITHUB_ACTIONS"
+        echo "Verifying CI detection in Go code..."
+        if [ "$CI" = "true" ] || [ "$GITHUB_ACTIONS" = "true" ]; then
+          echo "✅ CI environment detected correctly"
+        else
+          echo "❌ CI environment not detected - this will cause test failures"
+          exit 1
+        fi
+
     - name: Install Vagrant
       run: |
         wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
         echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list > /dev/null
         sudo apt update && sudo apt install vagrant
         vagrant --version
+        echo "Note: Vagrant is installed but VirtualBox/provider tests will be skipped in CI"
         
     - name: Run full CI pipeline (format, lint, security, test, build)
+      env:
+        CI: 'true'
+        GITHUB_ACTIONS: 'true'
+        SKIP_VAGRANT_VALIDATION: 'true'
       run: |
+        echo "Running CI pipeline with environment variables:"
+        echo "CI=$CI"
+        echo "GITHUB_ACTIONS=$GITHUB_ACTIONS"
+        echo "SKIP_VAGRANT_VALIDATION=$SKIP_VAGRANT_VALIDATION"
         make all
         
     - name: Upload build artifacts

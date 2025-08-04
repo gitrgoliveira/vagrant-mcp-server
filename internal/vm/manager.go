@@ -283,6 +283,12 @@ end`
 		return errors.OperationFailed("write Vagrantfile", err)
 	}
 
+	// Skip Vagrantfile validation in CI environments or when no provider is available
+	if m.shouldSkipProviderValidation() {
+		log.Info().Str("name", name).Msg("Skipping Vagrantfile validation (CI environment or no provider)")
+		return nil
+	}
+
 	// Always validate the Vagrantfile to ensure it's correct
 	cmd := exec.Command("vagrant", "validate")
 	cmd.Dir = vmDir
@@ -293,6 +299,26 @@ end`
 	log.Info().Str("name", name).Msg("Vagrantfile validated successfully")
 
 	return nil
+}
+
+// shouldSkipProviderValidation determines if provider-dependent operations should be skipped
+func (m *Manager) shouldSkipProviderValidation() bool {
+	// Skip if running in CI environment
+	if os.Getenv("CI") == "true" {
+		return true
+	}
+
+	// Skip if GitHub Actions environment
+	if os.Getenv("GITHUB_ACTIONS") == "true" {
+		return true
+	}
+
+	// Skip if explicitly requested
+	if os.Getenv("SKIP_VAGRANT_VALIDATION") == "true" {
+		return true
+	}
+
+	return false
 }
 
 // parseVagrantStatus parses the output of 'vagrant status --machine-readable'

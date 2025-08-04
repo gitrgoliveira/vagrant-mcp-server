@@ -19,7 +19,17 @@ import (
 	"github.com/vagrant-mcp/server/internal/vm"
 )
 
-// UnifiedFixture represents a test environment that can be shared across all packages
+// isCI returns true if running in a CI environment
+func isCI() bool {
+	return os.Getenv("CI") == "true" || os.Getenv("GITHUB_ACTIONS") == "true"
+}
+
+// shouldSkipProviderTests returns true if provider-dependent tests should be skipped
+func shouldSkipProviderTests() bool {
+	return isCI() || os.Getenv("SKIP_VAGRANT_VALIDATION") == "true"
+}
+
+// UnifiedFixture provides a unified test environment for all packages
 type UnifiedFixture struct {
 	VMManager   core.VMManager
 	SyncEngine  core.SyncEngine
@@ -172,7 +182,7 @@ func (f *UnifiedFixture) setupVM(opts FixtureOptions) error {
 	f.vmCreated = true
 
 	// Only start the VM if explicitly requested and not in CI
-	if opts.StartVM && os.Getenv("CI") != "true" {
+	if opts.StartVM && !shouldSkipProviderTests() {
 		if err := f.VMManager.StartVM(f.ctx, f.VMName); err != nil {
 			return fmt.Errorf("failed to start VM: %w", err)
 		}
