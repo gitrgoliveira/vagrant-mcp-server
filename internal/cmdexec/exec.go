@@ -1,3 +1,6 @@
+// Copyright Ricardo Oliveira 2025.
+// SPDX-License-Identifier: MPL-2.0
+
 // Package cmdexec provides a unified command execution interface
 package cmdexec
 

@@ -1,3 +1,6 @@
+// Copyright Ricardo Oliveira 2025.
+// SPDX-License-Identifier: MPL-2.0
+
 // Package core provides the core interfaces for the Vagrant MCP Server
 package core
 

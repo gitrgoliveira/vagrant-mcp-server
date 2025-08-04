@@ -1,3 +1,6 @@
+// Copyright Ricardo Oliveira 2025.
+// SPDX-License-Identifier: MPL-2.0
+
 // Package errors provides standardized error types and handling for the application
 package errors
 
