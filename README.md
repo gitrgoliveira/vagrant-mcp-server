@@ -126,7 +126,7 @@ The Vagrant MCP Server can be used with Visual Studio Code to allow AI assistant
 
 1. **Configure VS Code Settings**
 
-   Add the following to your VS Code `settings.json` file (Command Palette > Preferences: Open User Settings (JSON)):
+   Add the following to your VS Code `settings.json` or `mcp.json` file (Command Palette > Preferences: Open User Settings (JSON)):
 
    ```json
    "mcp": {
