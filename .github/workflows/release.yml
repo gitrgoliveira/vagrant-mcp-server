@@ -137,10 +137,10 @@ jobs:
           fi
           
           # Build with version injection
-          LDFLAGS="-ldflags=-X main.Version=v${VERSION} -X main.GitCommit=${GIT_COMMIT} -X main.BuildTime=${BUILD_TIME} -X main.GoVersion=${GO_VERSION} -w -s"
+          LDFLAGS="-X main.Version=v${VERSION} -X main.GitCommit=${GIT_COMMIT} -X main.BuildTime=${BUILD_TIME} -X main.GoVersion=${GO_VERSION} -w -s"
           
           echo "Building $BINARY_NAME..."
-          go build $LDFLAGS -o $BINARY_NAME ./cmd/server
+          go build -ldflags="$LDFLAGS" -o $BINARY_NAME ./cmd/server
           
           # Test the binary
           if [ "$GOOS" = "linux" ] && [ "$GOARCH" = "amd64" ]; then
