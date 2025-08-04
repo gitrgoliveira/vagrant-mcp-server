@@ -9,13 +9,23 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/rs/zerolog/log"
-	"github.com/vagrant-mcp/server/internal/exec"
-	"github.com/vagrant-mcp/server/internal/vm"
+	"github.com/vagrant-mcp/server/internal/core"
+	mcp_pkg "github.com/vagrant-mcp/server/pkg/mcp"
 )
 
 // RegisterVMTools registers all VM-related tools with the MCP server
-func RegisterVMTools(srv *server.MCPServer, vmManager exec.VMManager, syncEngine exec.SyncEngine) {
+func RegisterVMTools(srv *server.MCPServer, vmManager core.VMManager, syncEngine core.SyncEngine) {
 	// Create dev VM tool
+	type CreateVMArgs struct {
+		Name            string                   `json:"name"`
+		ProjectPath     string                   `json:"project_path"`
+		CPU             float64                  `json:"cpu"`
+		Memory          float64                  `json:"memory"`
+		Box             string                   `json:"box"`
+		SyncType        string                   `json:"sync_type"`
+		Ports           []map[string]interface{} `json:"ports"`
+		ExcludePatterns []string                 `json:"exclude_patterns"`
+	}
 	createVMTool := mcp.NewTool("create_dev_vm",
 		mcp.WithDescription("Create and configure a development VM with Vagrant"),
 		mcp.WithString("name",
@@ -37,14 +47,74 @@ func RegisterVMTools(srv *server.MCPServer, vmManager exec.VMManager, syncEngine
 			mcp.Description("Sync type to use"),
 			mcp.DefaultString("rsync")),
 		mcp.WithArray("ports",
-			mcp.Description("Ports to forward (format: [host:guest])")),
+			mcp.Description("Ports to forward (format: [host:guest])"),
+			mcp.Items(map[string]any{"type": "object"})),
 		mcp.WithArray("exclude_patterns",
-			mcp.Description("Patterns to exclude from sync")),
+			mcp.Description("Patterns to exclude from sync"),
+			mcp.Items(map[string]any{"type": "string"})),
 	)
 
-	srv.AddTool(createVMTool, handleCreateDevVM(vmManager))
+	mcp_pkg.RegisterTypedTool(srv, createVMTool, func(ctx context.Context, request mcp.CallToolRequest, args CreateVMArgs) (*mcp.CallToolResult, error) {
+		if args.Name == "" || args.ProjectPath == "" {
+			return mcp.NewToolResultError("Missing required parameter: name or project_path"), nil
+		}
+		// Convert ports
+		var ports []core.Port
+		for _, portMap := range args.Ports {
+			var port core.Port
+			if guest, ok := portMap["guest"].(float64); ok {
+				port.Guest = int(guest)
+			}
+			if host, ok := portMap["host"].(float64); ok {
+				port.Host = int(host)
+			}
+			ports = append(ports, port)
+		}
+		if len(ports) == 0 {
+			// Default ports
+			ports = []core.Port{
+				{Guest: 3000, Host: 3000},
+				{Guest: 8000, Host: 8000},
+				{Guest: 5432, Host: 5432},
+				{Guest: 3306, Host: 3306},
+				{Guest: 6379, Host: 6379},
+			}
+		}
+		// Exclude patterns
+		excludePatterns := args.ExcludePatterns
+		if len(excludePatterns) == 0 {
+			excludePatterns = []string{"node_modules", ".git", "*.log", "dist", "build", "__pycache__", "*.pyc", "venv", ".venv", "*.o", "*.out"}
+		}
+		config := core.VMConfig{
+			Box:                 args.Box,
+			CPU:                 int(args.CPU),
+			Memory:              int(args.Memory),
+			SyncType:            args.SyncType,
+			Ports:               ports,
+			SyncExcludePatterns: excludePatterns,
+		}
+		if err := vmManager.CreateVM(ctx, args.Name, args.ProjectPath, config); err != nil {
+			return mcp.NewToolResultErrorf("Failed to create VM: %v", err), nil
+		}
+		response := map[string]interface{}{
+			"name":         args.Name,
+			"project_path": args.ProjectPath,
+			"config":       config,
+			"status":       "created",
+			"timestamp":    time.Now().Format(time.RFC3339),
+		}
+		jsonResponse, err := json.Marshal(response)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to marshal response"), nil
+		}
+		return mcp.NewToolResultText(string(jsonResponse)), nil
+	})
 
 	// Ensure dev VM tool
+	type EnsureVMArgs struct {
+		Name        string `json:"name"`
+		ProjectPath string `json:"project_path"`
+	}
 	ensureVMTool := mcp.NewTool("ensure_dev_vm",
 		mcp.WithDescription("Ensure development VM is running, create if it doesn't exist"),
 		mcp.WithString("name",
@@ -54,161 +124,22 @@ func RegisterVMTools(srv *server.MCPServer, vmManager exec.VMManager, syncEngine
 			mcp.Description("Path to the project directory to sync (only needed for creation)")),
 	)
 
-	srv.AddTool(ensureVMTool, handleEnsureDevVM(vmManager, syncEngine))
-
-	// Destroy dev VM tool
-	destroyVMTool := mcp.NewTool("destroy_dev_vm",
-		mcp.WithDescription("Clean up development VM and associated resources"),
-		mcp.WithString("name",
-			mcp.Required(),
-			mcp.Description("Name of the development VM")),
-	)
-
-	srv.AddTool(destroyVMTool, handleDestroyDevVM(vmManager))
-
-	// Get VM status tool
-	getStatusTool := mcp.NewTool("get_vm_status",
-		mcp.WithDescription("Get status of one or all development VMs"),
-		mcp.WithString("name",
-			mcp.Description("Name of the development VM (optional)")),
-	)
-
-	srv.AddTool(getStatusTool, handleGetVMStatus(vmManager))
-}
-
-// handleCreateDevVM handles the create_dev_vm tool
-func handleCreateDevVM(manager exec.VMManager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// Extract parameters
-		name, err := request.RequireString("name")
-		if err != nil {
+	mcp_pkg.RegisterTypedTool(srv, ensureVMTool, func(ctx context.Context, request mcp.CallToolRequest, args EnsureVMArgs) (*mcp.CallToolResult, error) {
+		if args.Name == "" {
 			return mcp.NewToolResultError("Missing required parameter: name"), nil
 		}
-
-		projectPath, err := request.RequireString("project_path")
-		if err != nil {
-			return mcp.NewToolResultError("Missing required parameter: project_path"), nil
-		}
-
-		// Extract optional parameters with defaults
-		cpu := request.GetFloat("cpu", 2.0)
-		memory := request.GetFloat("memory", 2048.0)
-		box := request.GetString("box", "ubuntu/focal64")
-		syncType := request.GetString("sync_type", "rsync")
-
-		// Extract array parameters
-		var ports []vm.Port
-		args := request.GetArguments()
-		if args != nil {
-			if portsArray, ok := args["ports"].([]interface{}); ok && len(portsArray) > 0 {
-				for _, portMapping := range portsArray {
-					if portMap, ok := portMapping.(map[string]interface{}); ok {
-						var port vm.Port
-						if guest, ok := portMap["guest"].(float64); ok {
-							port.Guest = int(guest)
-						}
-						if host, ok := portMap["host"].(float64); ok {
-							port.Host = int(host)
-						}
-						ports = append(ports, port)
-					}
-				}
-			} else {
-				// Default ports for common development services
-				ports = []vm.Port{
-					{Guest: 3000, Host: 3000}, // Node.js/React
-					{Guest: 8000, Host: 8000}, // Django/Flask/etc.
-					{Guest: 5432, Host: 5432}, // PostgreSQL
-					{Guest: 3306, Host: 3306}, // MySQL
-					{Guest: 6379, Host: 6379}, // Redis
-				}
-			}
-		}
-
-		// Extract exclude patterns
-		var excludePatterns []string
-		if args != nil {
-			if excludePatternsArray, ok := args["exclude_patterns"].([]interface{}); ok {
-				for _, pattern := range excludePatternsArray {
-					if patternStr, ok := pattern.(string); ok {
-						excludePatterns = append(excludePatterns, patternStr)
-					}
-				}
-			} else {
-				// Default exclude patterns for common build artifacts and dependencies
-				excludePatterns = []string{
-					"node_modules",
-					".git",
-					"*.log",
-					"dist",
-					"build",
-					"__pycache__",
-					"*.pyc",
-					"venv",
-					".venv",
-					"*.o",
-					"*.out",
-				}
-			}
-		}
-
-		// Create VM config
-		config := vm.VMConfig{
-			Box:                 box,
-			CPU:                 int(cpu),
-			Memory:              int(memory),
-			SyncType:            syncType,
-			Ports:               ports,
-			SyncExcludePatterns: excludePatterns,
-		}
-
-		// Create VM
-		if err := manager.CreateVM(name, projectPath, config); err != nil {
-			return mcp.NewToolResultErrorf("Failed to create VM: %v", err), nil
-		}
-
-		// Return success
-		response := map[string]interface{}{
-			"name":         name,
-			"project_path": projectPath,
-			"config":       config,
-			"status":       "created",
-			"timestamp":    time.Now().Format(time.RFC3339),
-		}
-
-		jsonResponse, err := json.Marshal(response)
-		if err != nil {
-			return mcp.NewToolResultError("Failed to marshal response"), nil
-		}
-
-		return mcp.NewToolResultText(string(jsonResponse)), nil
-	}
-}
-
-// handleEnsureDevVM handles the ensure_dev_vm tool
-func handleEnsureDevVM(manager exec.VMManager, syncEngine exec.SyncEngine) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// Extract parameters
-		name, err := request.RequireString("name")
-		if err != nil {
-			return mcp.NewToolResultError("Missing required parameter: name"), nil
-		}
-
 		// Get VM state
-		state, err := manager.GetVMState(name)
+		state, err := vmManager.GetVMState(ctx, args.Name)
 		if err != nil {
 			// VM doesn't exist, see if we can create it
-			projectPath, err := request.RequireString("project_path")
-			if err != nil {
+			if args.ProjectPath == "" {
 				return mcp.NewToolResultError("VM doesn't exist. Missing required parameter for creation: project_path"), nil
 			}
-
-			// Create default config
-			config := vm.VMConfig{
+			config := core.VMConfig{
 				Box:    "ubuntu/focal64",
 				CPU:    2,
 				Memory: 2048,
-				Ports: []vm.Port{
+				Ports: []core.Port{
 					{Guest: 3000, Host: 3000},
 					{Guest: 8000, Host: 8000},
 					{Guest: 5432, Host: 5432},
@@ -218,79 +149,100 @@ func handleEnsureDevVM(manager exec.VMManager, syncEngine exec.SyncEngine) serve
 					"node_modules", ".git", "*.log", "dist", "build",
 				},
 			}
-
-			// Create VM
-			if err := manager.CreateVM(name, projectPath, config); err != nil {
+			if err := vmManager.CreateVM(ctx, args.Name, args.ProjectPath, config); err != nil {
 				return mcp.NewToolResultErrorf("Failed to create VM: %v", err), nil
 			}
-
-			// Register VM for syncing
-			if err := syncEngine.RegisterVM(name); err != nil {
+			syncConfig := core.SyncConfig{
+				VMName:          args.Name,
+				ProjectPath:     args.ProjectPath,
+				Method:          core.SyncMethod(config.SyncType),
+				Direction:       core.SyncToVM,
+				ExcludePatterns: config.SyncExcludePatterns,
+			}
+			if err := syncEngine.RegisterVM(ctx, args.Name, syncConfig); err != nil {
 				log.Error().Err(err).Msg("Failed to register VM with sync engine")
 			}
-
-			return mcp.NewToolResultText(fmt.Sprintf("VM '%s' created and started", name)), nil
+			return mcp.NewToolResultText(fmt.Sprintf("VM '%s' created and started", args.Name)), nil
 		}
-
-		// VM exists, check if it's running
-		if state != vm.Running {
-			// Start VM
-			if err := manager.StartVM(name); err != nil {
+		if state != core.Running {
+			if err := vmManager.StartVM(ctx, args.Name); err != nil {
 				return mcp.NewToolResultErrorf("Failed to start VM: %v", err), nil
 			}
-			return mcp.NewToolResultText(fmt.Sprintf("VM '%s' started", name)), nil
+			return mcp.NewToolResultText(fmt.Sprintf("VM '%s' started", args.Name)), nil
 		}
+		return mcp.NewToolResultText(fmt.Sprintf("VM '%s' is already running", args.Name)), nil
+	})
 
-		// VM is already running
-		return mcp.NewToolResultText(fmt.Sprintf("VM '%s' is already running", name)), nil
+	// Destroy dev VM tool
+	type DestroyVMArgs struct {
+		Name string `json:"name"`
 	}
-}
-
-// handleDestroyDevVM handles the destroy_dev_vm tool
-func handleDestroyDevVM(manager exec.VMManager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// Extract parameters
-		name, err := request.RequireString("name")
-		if err != nil {
+	destroyVMTool := mcp.NewTool("destroy_dev_vm",
+		mcp.WithDescription("Clean up development VM and associated resources"),
+		mcp.WithString("name",
+			mcp.Required(),
+			mcp.Description("Name of the development VM")),
+	)
+	mcp_pkg.RegisterTypedTool(srv, destroyVMTool, func(ctx context.Context, request mcp.CallToolRequest, args DestroyVMArgs) (*mcp.CallToolResult, error) {
+		if args.Name == "" {
 			return mcp.NewToolResultError("Missing required parameter: name"), nil
 		}
-
-		// Destroy VM
-		if err := manager.DestroyVM(name); err != nil {
+		if err := vmManager.DestroyVM(ctx, args.Name); err != nil {
 			return mcp.NewToolResultErrorf("Failed to destroy VM: %v", err), nil
 		}
+		return mcp.NewToolResultText(fmt.Sprintf("VM '%s' destroyed", args.Name)), nil
+	})
 
-		return mcp.NewToolResultText(fmt.Sprintf("VM '%s' destroyed", name)), nil
+	// Get VM status tool
+	type GetVMStatusArgs struct {
+		Name string `json:"name"`
 	}
-}
-
-// handleGetVMStatus handles the get_vm_status tool
-func handleGetVMStatus(manager exec.VMManager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// Extract parameters
-		name := request.GetString("name", "")
-		if name != "" {
-			// Get status of specific VM
-			state, err := manager.GetVMState(name)
+	getStatusTool := mcp.NewTool("get_vm_status",
+		mcp.WithDescription("Get status of one or all development VMs"),
+		mcp.WithString("name",
+			mcp.Description("Name of the development VM (optional)")),
+	)
+	mcp_pkg.RegisterTypedTool(srv, getStatusTool, func(ctx context.Context, request mcp.CallToolRequest, args GetVMStatusArgs) (*mcp.CallToolResult, error) {
+		if args.Name != "" {
+			state, err := vmManager.GetVMState(ctx, args.Name)
 			if err != nil {
 				return mcp.NewToolResultErrorf("Failed to get VM status: %v", err), nil
 			}
-
 			response := map[string]interface{}{
-				"name":  name,
+				"name":  args.Name,
 				"state": state,
 			}
-
 			jsonResponse, err := json.Marshal(response)
 			if err != nil {
 				return mcp.NewToolResultError("Failed to marshal response"), nil
 			}
-
 			return mcp.NewToolResultText(string(jsonResponse)), nil
 		}
-
-		// Get status of all VMs
-		// Here we'd need to implement a method to list all VMs, but for now we'll return an error
-		return mcp.NewToolResultText("Feature to list all VMs not yet implemented"), nil
-	}
+		vmNames, err := vmManager.ListVMs(ctx)
+		if err != nil {
+			return mcp.NewToolResultErrorf("Failed to list VMs: %v", err), nil
+		}
+		vmStates := make([]map[string]interface{}, 0, len(vmNames))
+		for _, vmName := range vmNames {
+			state, err := vmManager.GetVMState(ctx, vmName)
+			var stateStr string
+			if err != nil {
+				stateStr = "unknown"
+			} else {
+				stateStr = string(state)
+			}
+			vmStates = append(vmStates, map[string]interface{}{
+				"name":  vmName,
+				"state": stateStr,
+			})
+		}
+		response := map[string]interface{}{
+			"vms": vmStates,
+		}
+		jsonResponse, err := json.Marshal(response)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to marshal response"), nil
+		}
+		return mcp.NewToolResultText(string(jsonResponse)), nil
+	})
 }

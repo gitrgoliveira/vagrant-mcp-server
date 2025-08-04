@@ -8,12 +8,19 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/rs/zerolog/log"
+	"github.com/vagrant-mcp/server/internal/core"
 	"github.com/vagrant-mcp/server/internal/exec"
+	mcp_pkg "github.com/vagrant-mcp/server/pkg/mcp"
 )
 
 // RegisterExecTools registers all execution-related tools with the MCP server
-func RegisterExecTools(srv *server.MCPServer, vmManager exec.VMManager, syncEngine exec.SyncEngine, executor *exec.Executor) {
+func RegisterExecTools(srv *server.MCPServer, vmManager core.VMManager, syncEngine core.SyncEngine, executor *exec.Executor) {
 	// Execute in VM tool
+	type ExecInVMArgs struct {
+		VMName     string `json:"vm_name"`
+		Command    string `json:"command"`
+		WorkingDir string `json:"working_dir"`
+	}
 	execInVMTool := mcp.NewTool("exec_in_vm",
 		mcp.WithDescription("Execute a command in the VM without file synchronization"),
 		mcp.WithString("vm_name",
@@ -27,9 +34,47 @@ func RegisterExecTools(srv *server.MCPServer, vmManager exec.VMManager, syncEngi
 			mcp.DefaultString("/home/vagrant")),
 	)
 
-	srv.AddTool(execInVMTool, handleExecInVM(vmManager, executor))
+	mcp_pkg.RegisterTypedTool(srv, execInVMTool, func(ctx context.Context, request mcp.CallToolRequest, args ExecInVMArgs) (*mcp.CallToolResult, error) {
+		if args.VMName == "" || args.Command == "" {
+			return mcp.NewToolResultError("Missing required parameter: vm_name or command"), nil
+		}
+		workingDir := args.WorkingDir
+		if workingDir == "" {
+			workingDir = "/home/vagrant"
+		}
+		execCtx := exec.ExecutionContext{
+			VMName:     args.VMName,
+			WorkingDir: workingDir,
+			SyncBefore: false,
+			SyncAfter:  false,
+		}
+		result, err := executor.ExecuteCommand(ctx, args.Command, execCtx, nil)
+		if err != nil {
+			return mcp.NewToolResultErrorf("Command execution failed: %v", err), nil
+		}
+		response := map[string]interface{}{
+			"vm_name":    args.VMName,
+			"command":    args.Command,
+			"exit_code":  result.ExitCode,
+			"stdout":     result.Stdout,
+			"stderr":     result.Stderr,
+			"duration_s": result.Duration,
+		}
+		jsonResponse, err := json.Marshal(response)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to marshal response"), nil
+		}
+		return mcp.NewToolResultText(string(jsonResponse)), nil
+	})
 
 	// Execute with sync tool
+	type ExecWithSyncArgs struct {
+		VMName     string `json:"vm_name"`
+		Command    string `json:"command"`
+		WorkingDir string `json:"working_dir"`
+		SyncBefore bool   `json:"sync_before"`
+		SyncAfter  bool   `json:"sync_after"`
+	}
 	execWithSyncTool := mcp.NewTool("exec_with_sync",
 		mcp.WithDescription("Execute a command in the VM with file synchronization before and after"),
 		mcp.WithString("vm_name",
@@ -49,9 +94,54 @@ func RegisterExecTools(srv *server.MCPServer, vmManager exec.VMManager, syncEngi
 			mcp.DefaultBool(true)),
 	)
 
-	srv.AddTool(execWithSyncTool, handleExecWithSync(vmManager, syncEngine, executor))
+	mcp_pkg.RegisterTypedTool(srv, execWithSyncTool, func(ctx context.Context, request mcp.CallToolRequest, args ExecWithSyncArgs) (*mcp.CallToolResult, error) {
+		if args.VMName == "" || args.Command == "" {
+			return mcp.NewToolResultError("Missing required parameter: vm_name or command"), nil
+		}
+		workingDir := args.WorkingDir
+		if workingDir == "" {
+			workingDir = "/home/vagrant"
+		}
+		log.Info().
+			Str("vm", args.VMName).
+			Str("command", args.Command).
+			Bool("sync_before", args.SyncBefore).
+			Bool("sync_after", args.SyncAfter).
+			Msg("Executing command with sync")
+		execCtx := exec.ExecutionContext{
+			VMName:     args.VMName,
+			WorkingDir: workingDir,
+			SyncBefore: args.SyncBefore,
+			SyncAfter:  args.SyncAfter,
+		}
+		result, err := executor.ExecuteCommand(ctx, args.Command, execCtx, nil)
+		if err != nil {
+			return mcp.NewToolResultErrorf("Command execution failed: %v", err), nil
+		}
+		response := map[string]interface{}{
+			"vm_name":     args.VMName,
+			"command":     args.Command,
+			"exit_code":   result.ExitCode,
+			"stdout":      result.Stdout,
+			"stderr":      result.Stderr,
+			"duration_s":  result.Duration,
+			"sync_before": args.SyncBefore,
+			"sync_after":  args.SyncAfter,
+		}
+		jsonResponse, err := json.Marshal(response)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to marshal response"), nil
+		}
+		return mcp.NewToolResultText(string(jsonResponse)), nil
+	})
 
 	// Run background task tool
+	type RunBackgroundArgs struct {
+		VMName     string `json:"vm_name"`
+		Command    string `json:"command"`
+		WorkingDir string `json:"working_dir"`
+		SyncBefore bool   `json:"sync_before"`
+	}
 	runBackgroundTool := mcp.NewTool("run_background_task",
 		mcp.WithDescription("Run a command in the VM as a background task"),
 		mcp.WithString("vm_name",
@@ -68,170 +158,38 @@ func RegisterExecTools(srv *server.MCPServer, vmManager exec.VMManager, syncEngi
 			mcp.DefaultBool(true)),
 	)
 
-	srv.AddTool(runBackgroundTool, handleRunBackground(vmManager, syncEngine, executor))
-
-	log.Info().Msg("Execution tools registered")
-}
-
-// handleExecInVM handles the exec_in_vm tool
-func handleExecInVM(manager exec.VMManager, executor *exec.Executor) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// Extract parameters
-		vmName, err := request.RequireString("vm_name")
-		if err != nil {
-			return mcp.NewToolResultError("Missing required parameter: vm_name"), nil
+	mcp_pkg.RegisterTypedTool(srv, runBackgroundTool, func(ctx context.Context, request mcp.CallToolRequest, args RunBackgroundArgs) (*mcp.CallToolResult, error) {
+		if args.VMName == "" || args.Command == "" {
+			return mcp.NewToolResultError("Missing required parameter: vm_name or command"), nil
 		}
-
-		command, err := request.RequireString("command")
-		if err != nil {
-			return mcp.NewToolResultError("Missing required parameter: command"), nil
+		workingDir := args.WorkingDir
+		if workingDir == "" {
+			workingDir = "/home/vagrant"
 		}
-
-		workingDir := request.GetString("working_dir", "/home/vagrant")
-
-		// Create execution context
 		execCtx := exec.ExecutionContext{
-			VMName:     vmName,
+			VMName:     args.VMName,
 			WorkingDir: workingDir,
-			SyncBefore: false,
-			SyncAfter:  false,
-		}
-
-		// Execute command
-		result, err := executor.ExecuteCommand(ctx, command, execCtx, nil)
-		if err != nil {
-			return mcp.NewToolResultErrorf("Command execution failed: %v", err), nil
-		}
-
-		// Format result
-		response := map[string]interface{}{
-			"vm_name":    vmName,
-			"command":    command,
-			"exit_code":  result.ExitCode,
-			"stdout":     result.Stdout,
-			"stderr":     result.Stderr,
-			"duration_s": result.Duration,
-		}
-
-		jsonResponse, err := json.Marshal(response)
-		if err != nil {
-			return mcp.NewToolResultError("Failed to marshal response"), nil
-		}
-
-		return mcp.NewToolResultText(string(jsonResponse)), nil
-	}
-}
-
-// handleExecWithSync handles the exec_with_sync tool
-func handleExecWithSync(manager exec.VMManager, syncEngine exec.SyncEngine, executor *exec.Executor) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// Extract parameters
-		vmName, err := request.RequireString("vm_name")
-		if err != nil {
-			return mcp.NewToolResultError("Missing required parameter: vm_name"), nil
-		}
-
-		command, err := request.RequireString("command")
-		if err != nil {
-			return mcp.NewToolResultError("Missing required parameter: command"), nil
-		}
-
-		workingDir := request.GetString("working_dir", "/home/vagrant")
-		syncBefore := request.GetBool("sync_before", true)
-		syncAfter := request.GetBool("sync_after", true)
-
-		// Log sync strategy
-		log.Info().
-			Str("vm", vmName).
-			Str("command", command).
-			Bool("sync_before", syncBefore).
-			Bool("sync_after", syncAfter).
-			Msg("Executing command with sync")
-
-		// Create execution context
-		execCtx := exec.ExecutionContext{
-			VMName:     vmName,
-			WorkingDir: workingDir,
-			SyncBefore: syncBefore,
-			SyncAfter:  syncAfter,
-		}
-
-		// Execute command
-		result, err := executor.ExecuteCommand(ctx, command, execCtx, nil)
-		if err != nil {
-			return mcp.NewToolResultErrorf("Command execution failed: %v", err), nil
-		}
-
-		// Format result
-		response := map[string]interface{}{
-			"vm_name":     vmName,
-			"command":     command,
-			"exit_code":   result.ExitCode,
-			"stdout":      result.Stdout,
-			"stderr":      result.Stderr,
-			"duration_s":  result.Duration,
-			"sync_before": syncBefore,
-			"sync_after":  syncAfter,
-		}
-
-		jsonResponse, err := json.Marshal(response)
-		if err != nil {
-			return mcp.NewToolResultError("Failed to marshal response"), nil
-		}
-
-		return mcp.NewToolResultText(string(jsonResponse)), nil
-	}
-}
-
-// handleRunBackground handles the run_background_task tool
-func handleRunBackground(manager exec.VMManager, syncEngine exec.SyncEngine, executor *exec.Executor) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// Extract parameters
-		vmName, err := request.RequireString("vm_name")
-		if err != nil {
-			return mcp.NewToolResultError("Missing required parameter: vm_name"), nil
-		}
-
-		command, err := request.RequireString("command")
-		if err != nil {
-			return mcp.NewToolResultError("Missing required parameter: command"), nil
-		}
-
-		workingDir := request.GetString("working_dir", "/home/vagrant")
-		syncBefore := request.GetBool("sync_before", true)
-
-		// Create execution context
-		execCtx := exec.ExecutionContext{
-			VMName:     vmName,
-			WorkingDir: workingDir,
-			SyncBefore: syncBefore,
+			SyncBefore: args.SyncBefore,
 			SyncAfter:  false, // No sync after for background tasks
 		}
-
-		// Modify command to run in background with nohup
-		bgCommand := fmt.Sprintf("nohup %s > /tmp/bg_%s.log 2>&1 &", command,
-			vmName)
-
-		// Execute command
+		bgCommand := fmt.Sprintf("nohup %s > /tmp/bg_%s.log 2>&1 &", args.Command, args.VMName)
 		result, err := executor.ExecuteCommand(ctx, bgCommand, execCtx, nil)
 		if err != nil {
 			return mcp.NewToolResultErrorf("Background task start failed: %v", err), nil
 		}
-
-		// Format result
 		response := map[string]interface{}{
-			"vm_name":   vmName,
-			"command":   command,
+			"vm_name":   args.VMName,
+			"command":   args.Command,
 			"status":    "started",
-			"log_file":  fmt.Sprintf("/tmp/bg_%s.log", vmName),
+			"log_file":  fmt.Sprintf("/tmp/bg_%s.log", args.VMName),
 			"exit_code": result.ExitCode,
 		}
-
 		jsonResponse, err := json.Marshal(response)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to marshal response"), nil
 		}
-
 		return mcp.NewToolResultText(string(jsonResponse)), nil
-	}
+	})
+
+	log.Info().Msg("Execution tools registered")
 }

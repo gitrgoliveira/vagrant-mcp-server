@@ -6,114 +6,104 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/rs/zerolog/log"
-	"github.com/vagrant-mcp/server/internal/exec"
-	"github.com/vagrant-mcp/server/internal/vm"
+	"github.com/vagrant-mcp/server/internal/core"
+	"github.com/vagrant-mcp/server/pkg/mcp"
 )
 
 // RegisterSyncTools registers all sync-related tools with the MCP server
-func RegisterSyncTools(srv *server.MCPServer, vmManager exec.VMManager, syncEngine exec.SyncEngine) {
+func RegisterSyncTools(srv *server.MCPServer, syncEngine core.SyncEngine, vmManager core.VMManager) {
 	// Configure sync tool
-	configureSyncTool := mcp.NewTool("configure_sync",
-		mcp.WithDescription("Configure sync method and options"),
-		mcp.WithString("vm_name", mcp.Required(), mcp.Description("Name of the development VM")),
-		mcp.WithString("sync_type", mcp.Required(), mcp.Description("Type of sync to use (rsync, nfs, etc.)")),
-		mcp.WithString("host_path", mcp.Description("Host path to sync")),
-		mcp.WithString("guest_path", mcp.Description("Guest path to sync")),
-		mcp.WithArray("exclude_patterns", mcp.Description("Patterns to exclude from sync")),
+	configureSyncTool := mcpgo.NewTool("configure_sync",
+		mcpgo.WithDescription("Configure sync method and options"),
+		mcpgo.WithString("vm_name", mcpgo.Required(), mcpgo.Description("Name of the development VM")),
+		mcpgo.WithString("sync_type", mcpgo.Required(), mcpgo.Description("Type of sync to use (rsync, nfs, etc.)")),
+		mcpgo.WithString("host_path", mcpgo.Description("Host path to sync")),
+		mcpgo.WithString("guest_path", mcpgo.Description("Guest path to sync")),
+		mcpgo.WithArray("exclude_patterns",
+			mcpgo.Description("Patterns to exclude from sync"),
+			mcpgo.Items(map[string]any{"type": "string"})),
 	)
 
 	srv.AddTool(configureSyncTool, handleConfigureSync(vmManager, syncEngine))
 
 	// Sync to VM tool
-	syncToVMTool := mcp.NewTool("sync_to_vm",
-		mcp.WithDescription("Sync files from host to VM"),
-		mcp.WithString("vm_name", mcp.Required(), mcp.Description("Name of the development VM")),
+	syncToVMTool := mcpgo.NewTool("sync_to_vm",
+		mcpgo.WithDescription("Sync files from host to VM"),
+		mcpgo.WithString("vm_name", mcpgo.Required(), mcpgo.Description("Name of the development VM")),
 	)
 
-	srv.AddTool(syncToVMTool, handleSyncToVM(vmManager, syncEngine))
+	srv.AddTool(syncToVMTool, handleSyncToVM(syncEngine, vmManager))
 
 	// Sync from VM tool
-	syncFromVMTool := mcp.NewTool("sync_from_vm",
-		mcp.WithDescription("Sync files from VM to host"),
-		mcp.WithString("vm_name", mcp.Required(), mcp.Description("Name of the development VM")),
+	syncFromVMTool := mcpgo.NewTool("sync_from_vm",
+		mcpgo.WithDescription("Sync files from VM to host"),
+		mcpgo.WithString("vm_name", mcpgo.Required(), mcpgo.Description("Name of the development VM")),
 	)
 
-	srv.AddTool(syncFromVMTool, handleSyncFromVM(vmManager, syncEngine))
+	srv.AddTool(syncFromVMTool, handleSyncFromVM(syncEngine, vmManager))
 
 	// Upload to VM tool
-	uploadToVMTool := mcp.NewTool("upload_to_vm",
-		mcp.WithDescription("Upload files from host to VM"),
-		mcp.WithString("vm_name", mcp.Required(), mcp.Description("Name of the development VM")),
-		mcp.WithString("source", mcp.Required(), mcp.Description("Source file or directory path on host")),
-		mcp.WithString("destination", mcp.Required(), mcp.Description("Destination path on VM")),
-		mcp.WithBoolean("compress", mcp.Description("Whether to compress the file before upload")),
-		mcp.WithString("compression_type", mcp.Description("Compression type to use (tgz, zip)")),
+	uploadToVMTool := mcpgo.NewTool("upload_to_vm",
+		mcpgo.WithDescription("Upload files from host to VM"),
+		mcpgo.WithString("vm_name", mcpgo.Required(), mcpgo.Description("Name of the development VM")),
+		mcpgo.WithString("source", mcpgo.Required(), mcpgo.Description("Source file or directory path on host")),
+		mcpgo.WithString("destination", mcpgo.Required(), mcpgo.Description("Destination path on VM")),
+		mcpgo.WithBoolean("compress", mcpgo.Description("Whether to compress the file before upload")),
+		mcpgo.WithString("compression_type", mcpgo.Description("Compression type to use (tgz, zip)")),
 	)
 
 	srv.AddTool(uploadToVMTool, handleUploadToVM(vmManager))
 
 	// Sync status tool
-	syncStatusTool := mcp.NewTool("sync_status",
-		mcp.WithDescription("Get sync status information"),
-		mcp.WithString("vm_name", mcp.Required(), mcp.Description("Name of the development VM")),
+	syncStatusTool := mcpgo.NewTool("sync_status",
+		mcpgo.WithDescription("Get sync status information"),
+		mcpgo.WithString("vm_name", mcpgo.Required(), mcpgo.Description("Name of the development VM")),
 	)
 
-	srv.AddTool(syncStatusTool, handleSyncStatus(vmManager, syncEngine))
+	srv.AddTool(syncStatusTool, handleSyncStatus(syncEngine, vmManager))
 
 	// Resolve sync conflicts tool
-	resolveSyncConflictTool := mcp.NewTool("resolve_sync_conflicts",
-		mcp.WithDescription("Handle sync conflicts interactively"),
-		mcp.WithString("vm_name", mcp.Required(), mcp.Description("Name of the development VM")),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Path of the conflicted file")),
-		mcp.WithString("resolution", mcp.Required(),
-			mcp.Description("Resolution method: 'use_host', 'use_vm', 'merge', 'keep_both'")),
+	resolveSyncConflictTool := mcpgo.NewTool("resolve_sync_conflicts",
+		mcpgo.WithDescription("Handle sync conflicts interactively"),
+		mcpgo.WithString("vm_name", mcpgo.Required(), mcpgo.Description("Name of the development VM")),
+		mcpgo.WithString("path", mcpgo.Required(), mcpgo.Description("Path of the conflicted file")),
+		mcpgo.WithString("resolution", mcpgo.Required(),
+			mcpgo.Description("Resolution method: 'use_host', 'use_vm', 'merge', 'keep_both'")),
 	)
 
 	srv.AddTool(resolveSyncConflictTool, handleResolveSyncConflict(vmManager, syncEngine))
 
 	// Semantic search tool
-	semanticSearchTool := mcp.NewTool("search_code",
-		mcp.WithDescription("Search code semantically in the VM"),
-		mcp.WithString("vm_name", mcp.Required(), mcp.Description("Name of the development VM")),
-		mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
-		mcp.WithString("search_type", mcp.Description("Type of search: 'semantic', 'exact', or 'fuzzy'"),
-			mcp.DefaultString("semantic")),
-		mcp.WithNumber("max_results", mcp.Description("Maximum number of results to return"),
-			mcp.DefaultNumber(20)),
-		mcp.WithBoolean("case_sensitive", mcp.Description("Whether the search is case sensitive")),
+	semanticSearchTool := mcpgo.NewTool("search_code",
+		mcpgo.WithDescription("Search code semantically in the VM"),
+		mcpgo.WithString("vm_name", mcpgo.Required(), mcpgo.Description("Name of the development VM")),
+		mcpgo.WithString("query", mcpgo.Required(), mcpgo.Description("Search query")),
+		mcpgo.WithString("search_type", mcpgo.Description("Type of search: 'semantic', 'exact', or 'fuzzy'"),
+			mcpgo.DefaultString("semantic")),
+		mcpgo.WithNumber("max_results", mcpgo.Description("Maximum number of results to return"),
+			mcpgo.DefaultNumber(20)),
+		mcpgo.WithBoolean("case_sensitive", mcpgo.Description("Whether the search is case sensitive")),
 	)
 
 	srv.AddTool(semanticSearchTool, handleSearchCode(vmManager, syncEngine))
-
-	// Upload to VM tool
-	uploadFileToVMTool := mcp.NewTool("upload_to_vm",
-		mcp.WithDescription("Upload files from host to VM"),
-		mcp.WithString("vm_name", mcp.Required(), mcp.Description("Name of the development VM")),
-		mcp.WithString("source", mcp.Required(), mcp.Description("Source file or directory on the host")),
-		mcp.WithString("destination", mcp.Required(), mcp.Description("Destination path in the VM")),
-		mcp.WithBoolean("compress", mcp.Description("Whether to compress the files during upload")),
-		mcp.WithString("compression_type", mcp.Description("Type of compression to use")),
-	)
-
-	srv.AddTool(uploadFileToVMTool, handleUploadToVM(vmManager))
 
 	log.Info().Msg("Sync tools registered")
 }
 
 // handleConfigureSync handles the configure_sync tool
-func handleConfigureSync(manager exec.VMManager, syncEngine exec.SyncEngine) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleConfigureSync(manager core.VMManager, syncEngine core.SyncEngine) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		vmName, err := request.RequireString("vm_name")
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Missing or invalid 'vm_name' parameter: %v", err)), nil
+			return mcpgo.NewToolResultError(fmt.Sprintf("Missing or invalid 'vm_name' parameter: %v", err)), nil
 		}
 
 		syncType, err := request.RequireString("sync_type")
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Missing or invalid 'sync_type' parameter: %v", err)), nil
+			return mcpgo.NewToolResultError(fmt.Sprintf("Missing or invalid 'sync_type' parameter: %v", err)), nil
 		}
 
 		hostPath := request.GetString("host_path", "")
@@ -130,13 +120,13 @@ func handleConfigureSync(manager exec.VMManager, syncEngine exec.SyncEngine) ser
 		}
 
 		// Check VM state
-		state, err := manager.GetVMState(vmName)
+		state, err := manager.GetVMState(ctx, vmName)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' does not exist: %v", vmName, err)), nil
 		}
 
 		// Get VM config
-		config, err := manager.GetVMConfig(vmName)
+		config, err := manager.GetVMConfig(ctx, vmName)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to get VM config: %v", err)), nil
 		}
@@ -154,7 +144,7 @@ func handleConfigureSync(manager exec.VMManager, syncEngine exec.SyncEngine) ser
 		}
 
 		// Update config file
-		if err := manager.UpdateVMConfig(vmName, config); err != nil {
+		if err := manager.UpdateVMConfig(ctx, vmName, config); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to update VM config: %v", err)), nil
 		}
 
@@ -178,109 +168,81 @@ func handleConfigureSync(manager exec.VMManager, syncEngine exec.SyncEngine) ser
 }
 
 // handleSyncToVM handles the sync_to_vm tool
-func handleSyncToVM(manager exec.VMManager, syncEngine exec.SyncEngine) server.ToolHandlerFunc {
+func handleSyncToVM(syncEngine core.SyncEngine, vmManager core.VMManager) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		vmName, err := request.RequireString("vm_name")
+		// Use validation helper
+		validator := NewValidationHelper()
+		responseHelper := NewResponseHelper()
+
+		// Validate required parameters
+		vmName, errorResult, err := validator.ValidateRequiredString(request, "vm_name")
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Missing or invalid 'vm_name' parameter: %v", err)), nil
+			return errorResult, nil
 		}
 
-		// Check VM state
-		state, err := manager.GetVMState(vmName)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' does not exist: %v", vmName, err)), nil
-		}
-
-		if state != vm.Running {
-			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' is not running (current state: %s)", vmName, state)), nil
+		// Validate VM is running
+		if errorResult, err := validator.ValidateVMRunning(ctx, vmManager, vmName); err != nil {
+			return errorResult, nil
 		}
 
 		// Perform sync to VM
-		result, err := syncEngine.SyncToVM(vmName, "")
+		result, err := syncEngine.SyncToVM(ctx, vmName, "")
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Sync to VM failed: %v", err)), nil
 		}
 
-		// Format the response
-		response := map[string]interface{}{
-			"status":         "success",
-			"vm_name":        vmName,
-			"synced_files":   result.SyncedFiles,
-			"sync_time_ms":   result.SyncTimeMs,
-			"file_count":     len(result.SyncedFiles),
-			"last_sync_time": time.Now().Format(time.RFC3339),
-		}
-
-		// Convert to JSON
-		jsonData, err := json.Marshal(response)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal result: %v", err)), nil
-		}
-
-		return mcp.NewToolResultText(string(jsonData)), nil
+		// Create standardized response using helper
+		response := responseHelper.CreateSyncResponse(vmName, result.SyncedFiles, result.SyncTimeMs, "sync_to_vm")
+		return responseHelper.MarshalSuccessResponse(response)
 	}
 }
 
 // handleSyncFromVM handles the sync_from_vm tool
-func handleSyncFromVM(manager exec.VMManager, syncEngine exec.SyncEngine) server.ToolHandlerFunc {
+func handleSyncFromVM(syncEngine core.SyncEngine, vmManager core.VMManager) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		vmName, err := request.RequireString("vm_name")
+		// Use validation helper
+		validator := NewValidationHelper()
+		responseHelper := NewResponseHelper()
+
+		// Validate required parameters
+		vmName, errorResult, err := validator.ValidateRequiredString(request, "vm_name")
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Missing or invalid 'vm_name' parameter: %v", err)), nil
+			return errorResult, nil
 		}
 
-		// Check VM state
-		state, err := manager.GetVMState(vmName)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' does not exist: %v", vmName, err)), nil
-		}
-
-		if state != vm.Running {
-			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' is not running (current state: %s)", vmName, state)), nil
+		// Validate VM is running
+		if errorResult, err := validator.ValidateVMRunning(ctx, vmManager, vmName); err != nil {
+			return errorResult, nil
 		}
 
 		// Perform sync from VM
-		result, err := syncEngine.SyncFromVM(vmName, "")
+		result, err := syncEngine.SyncFromVM(ctx, vmName, "")
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Sync from VM failed: %v", err)), nil
 		}
 
-		// Format the response
-		response := map[string]interface{}{
-			"status":         "success",
-			"vm_name":        vmName,
-			"synced_files":   result.SyncedFiles,
-			"sync_time_ms":   result.SyncTimeMs,
-			"file_count":     len(result.SyncedFiles),
-			"last_sync_time": time.Now().Format(time.RFC3339),
-		}
-
-		// Convert to JSON
-		jsonData, err := json.Marshal(response)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal result: %v", err)), nil
-		}
-
-		return mcp.NewToolResultText(string(jsonData)), nil
+		// Create standardized response using helper
+		response := responseHelper.CreateSyncResponse(vmName, result.SyncedFiles, result.SyncTimeMs, "sync_from_vm")
+		return responseHelper.MarshalSuccessResponse(response)
 	}
 }
 
 // handleSyncStatus handles the sync_status tool
-func handleSyncStatus(manager exec.VMManager, syncEngine exec.SyncEngine) server.ToolHandlerFunc {
+func handleSyncStatus(syncEngine core.SyncEngine, vmManager core.VMManager) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		vmName, err := request.RequireString("vm_name")
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Missing or invalid 'vm_name' parameter: %v", err)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("missing or invalid 'vm_name' parameter: %v", err)), nil
 		}
 
 		// Check VM state
-		state, err := manager.GetVMState(vmName)
+		state, err := vmManager.GetVMState(ctx, vmName)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' does not exist: %v", vmName, err)), nil
 		}
 
 		// Get sync status
-		status, err := syncEngine.GetSyncStatus(vmName)
+		status, err := syncEngine.GetSyncStatus(ctx, vmName)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to get sync status: %v", err)), nil
 		}
@@ -308,7 +270,7 @@ func handleSyncStatus(manager exec.VMManager, syncEngine exec.SyncEngine) server
 }
 
 // handleResolveSyncConflict handles the resolve_sync_conflicts tool
-func handleResolveSyncConflict(manager exec.VMManager, syncEngine exec.SyncEngine) server.ToolHandlerFunc {
+func handleResolveSyncConflict(manager core.VMManager, syncEngine core.SyncEngine) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Extract parameters
 		vmName, err := request.RequireString("vm_name")
@@ -327,17 +289,17 @@ func handleResolveSyncConflict(manager exec.VMManager, syncEngine exec.SyncEngin
 		}
 
 		// Check VM state
-		state, err := manager.GetVMState(vmName)
+		state, err := manager.GetVMState(ctx, vmName)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' does not exist: %v", vmName, err)), nil
 		}
 
-		if state != vm.Running {
+		if state != core.Running {
 			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' is not running (current state: %s)", vmName, state)), nil
 		}
 
 		// Resolve conflict
-		err = syncEngine.ResolveSyncConflict(vmName, path, resolution)
+		err = syncEngine.ResolveSyncConflict(ctx, vmName, path, resolution)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to resolve conflict: %v", err)), nil
 		}
@@ -362,7 +324,7 @@ func handleResolveSyncConflict(manager exec.VMManager, syncEngine exec.SyncEngin
 }
 
 // handleSearchCode handles the search_code tool
-func handleSearchCode(manager exec.VMManager, syncEngine exec.SyncEngine) server.ToolHandlerFunc {
+func handleSearchCode(manager core.VMManager, syncEngine core.SyncEngine) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Extract parameters
 		vmName, err := request.RequireString("vm_name")
@@ -388,12 +350,12 @@ func handleSearchCode(manager exec.VMManager, syncEngine exec.SyncEngine) server
 		}
 
 		// Check VM state
-		state, err := manager.GetVMState(vmName)
+		state, err := manager.GetVMState(ctx, vmName)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' does not exist: %v", vmName, err)), nil
 		}
 
-		if state != vm.Running {
+		if state != core.Running {
 			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' is not running (current state: %s)", vmName, state)), nil
 		}
 
@@ -403,11 +365,11 @@ func handleSearchCode(manager exec.VMManager, syncEngine exec.SyncEngine) server
 
 		switch searchType {
 		case "semantic":
-			results, searchErr = syncEngine.SemanticSearch(vmName, query, maxResults)
+			results, searchErr = syncEngine.SemanticSearch(ctx, vmName, query, maxResults)
 		case "exact":
-			results, searchErr = syncEngine.ExactSearch(vmName, query, caseSensitive, maxResults)
+			results, searchErr = syncEngine.ExactSearch(ctx, vmName, query, caseSensitive, maxResults)
 		case "fuzzy":
-			results, searchErr = syncEngine.FuzzySearch(vmName, query, maxResults)
+			results, searchErr = syncEngine.FuzzySearch(ctx, vmName, query, maxResults)
 		default:
 			return mcp.NewToolResultError(fmt.Sprintf("Invalid search type: %s (must be 'semantic', 'exact', or 'fuzzy')", searchType)), nil
 		}
@@ -437,7 +399,7 @@ func handleSearchCode(manager exec.VMManager, syncEngine exec.SyncEngine) server
 }
 
 // handleUploadToVM handles the upload_to_vm tool
-func handleUploadToVM(manager exec.VMManager) server.ToolHandlerFunc {
+func handleUploadToVM(manager core.VMManager) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		vmName, err := request.RequireString("vm_name")
 		if err != nil {
@@ -459,17 +421,17 @@ func handleUploadToVM(manager exec.VMManager) server.ToolHandlerFunc {
 		compressionType := request.GetString("compression_type", "") // Default will be decided by vagrant
 
 		// Check VM state
-		state, err := manager.GetVMState(vmName)
+		state, err := manager.GetVMState(ctx, vmName)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' does not exist: %v", vmName, err)), nil
 		}
 
-		if state != vm.Running {
+		if state != core.Running {
 			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' is not running (current state: %s)", vmName, state)), nil
 		}
 
 		// Upload file to VM
-		err = manager.UploadToVM(vmName, source, destination, compress, compressionType)
+		err = manager.UploadToVM(ctx, vmName, source, destination, compress, compressionType)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Upload to VM failed: %v", err)), nil
 		}

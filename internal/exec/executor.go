@@ -6,47 +6,15 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
-	syncmod "github.com/vagrant-mcp/server/internal/sync"
-	"github.com/vagrant-mcp/server/internal/vm"
+	"github.com/vagrant-mcp/server/internal/core"
+	"github.com/vagrant-mcp/server/internal/errors"
 )
-
-// VMManager defines the interface for virtual machine management operations
-type VMManager interface {
-	CreateVM(name, projectPath string, config vm.VMConfig) error
-	StartVM(name string) error
-	StopVM(name string) error
-	DestroyVM(name string) error
-	GetVMState(name string) (vm.State, error)
-	ExecuteCommand(name string, cmd string, args []string, workingDir string) (string, string, int, error)
-	SyncToVM(name, source, target string) error
-	SyncFromVM(name, source, target string) error
-	UploadToVM(name, source, destination string, compress bool, compressionType string) error
-	GetSSHConfig(name string) (map[string]string, error)
-	GetVMConfig(name string) (vm.VMConfig, error)
-	UpdateVMConfig(name string, config vm.VMConfig) error
-	GetBaseDir() string
-}
-
-// SyncEngine defines the interface for file synchronization operations
-type SyncEngine interface {
-	RegisterVM(vmName string) error
-	UnregisterVM(vmName string) error
-	SyncToVM(vmName string, sourcePath string) (*syncmod.SyncResult, error)
-	SyncFromVM(vmName string, sourcePath string) (*syncmod.SyncResult, error)
-	GetSyncStatus(vmName string) (syncmod.SyncStatus, error)
-	ResolveSyncConflict(vmName, path, resolution string) error
-	SemanticSearch(vmName, query string, maxResults int) ([]syncmod.SearchResult, error)
-	ExactSearch(vmName, query string, caseSensitive bool, maxResults int) ([]syncmod.SearchResult, error)
-	FuzzySearch(vmName, query string, maxResults int) ([]syncmod.SearchResult, error)
-}
 
 // CommandResult contains the result of a command execution
 type CommandResult struct {
@@ -69,14 +37,15 @@ type ExecutionContext struct {
 type OutputCallback func(data []byte, isStderr bool)
 
 // Executor manages command execution in VMs
+// Update to use core interfaces
 type Executor struct {
-	vmManager  VMManager
-	syncEngine SyncEngine
+	vmManager  core.VMManager
+	syncEngine core.SyncEngine
 	mu         sync.Mutex
 }
 
 // NewExecutor creates a new command executor
-func NewExecutor(vmManager VMManager, syncEngine SyncEngine) (*Executor, error) {
+func NewExecutor(vmManager core.VMManager, syncEngine core.SyncEngine) (*Executor, error) {
 	return &Executor{
 		vmManager:  vmManager,
 		syncEngine: syncEngine,
@@ -96,21 +65,20 @@ func (e *Executor) ExecuteCommand(ctx context.Context, command string, execCtx E
 	}
 
 	// Check if VM exists and is running
-	state, err := e.vmManager.GetVMState(execCtx.VMName)
+	state, err := e.vmManager.GetVMState(ctx, execCtx.VMName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get VM state: %w", err)
+		return nil, errors.OperationFailed("get VM state", err)
 	}
-
-	if state != vm.Running {
-		return nil, fmt.Errorf("VM is not running (current state: %s)", state)
+	if state != core.Running {
+		return nil, errors.OperationFailed("VM is not running", nil)
 	}
 
 	// Perform pre-execution sync if requested
 	if execCtx.SyncBefore {
 		log.Info().Str("vm", execCtx.VMName).Msg("Syncing files to VM before command execution")
-		err := e.syncEngine.RegisterVM(execCtx.VMName)
+		err := e.syncEngine.RegisterVM(ctx, execCtx.VMName, core.SyncConfig{})
 		if err != nil {
-			return nil, fmt.Errorf("failed to register VM for sync: %w", err)
+			return nil, errors.OperationFailed("register VM for sync", err)
 		}
 	}
 
@@ -126,7 +94,7 @@ func (e *Executor) ExecuteCommand(ctx context.Context, command string, execCtx E
 
 	// Handle execution error
 	if err != nil {
-		return result, fmt.Errorf("command execution failed: %w", err)
+		return result, errors.OperationFailed("command execution failed", err)
 	}
 
 	// Perform post-execution sync if requested
@@ -139,12 +107,23 @@ func (e *Executor) ExecuteCommand(ctx context.Context, command string, execCtx E
 	return result, nil
 }
 
+// GetSSHConfig retrieves the SSH configuration for the VM using 'vagrant ssh-config'
+func (e *Executor) getSSHConfig(ctx context.Context, name string) (map[string]string, error) {
+	// Try to use the underlying adapter if available
+	if adapter, ok := e.vmManager.(interface {
+		GetSSHConfig(context.Context, string) (map[string]string, error)
+	}); ok {
+		return adapter.GetSSHConfig(ctx, name)
+	}
+	return nil, errors.New(errors.CodeNotImplemented, "GetSSHConfig for this VMManager is not implemented")
+}
+
 // executeSSHCommand executes a command via SSH in a VM
 func (e *Executor) executeSSHCommand(ctx context.Context, command string, execCtx ExecutionContext, callback OutputCallback) (*CommandResult, error) {
 	// Get SSH config for the VM
-	sshConfig, err := e.vmManager.GetSSHConfig(execCtx.VMName)
+	sshConfig, err := e.getSSHConfig(ctx, execCtx.VMName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get SSH config: %w", err)
+		return nil, errors.OperationFailed("get SSH config", err)
 	}
 
 	// Build the SSH command
@@ -187,17 +166,17 @@ func (e *Executor) executeSSHCommand(ctx context.Context, command string, execCt
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
+		return nil, errors.OperationFailed("create stdout pipe", err)
 	}
 
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
+		return nil, errors.OperationFailed("create stderr pipe", err)
 	}
 
 	// Start command
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start command: %w", err)
+		return nil, errors.OperationFailed("start command", err)
 	}
 
 	// Process command output in separate goroutines
@@ -232,7 +211,7 @@ func (e *Executor) executeSSHCommand(ctx context.Context, command string, execCt
 			result.ExitCode = exitErr.ExitCode()
 		} else {
 			result.ExitCode = -1
-			return result, fmt.Errorf("command failed: %w", err)
+			return result, errors.OperationFailed("command failed", err)
 		}
 	} else {
 		result.ExitCode = 0
@@ -258,19 +237,4 @@ func (e *Executor) streamOutput(r io.Reader, buffer *bytes.Buffer, isStderr bool
 			callback(lineCopy, isStderr)
 		}
 	}
-}
-
-// GetVMDir returns the directory for a VM
-func (e *Executor) GetVMDir(vmName string) (string, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get user home directory: %w", err)
-	}
-
-	vmDir := filepath.Join(homeDir, ".vagrant-mcp", "vms", vmName)
-	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
-		return "", fmt.Errorf("VM directory does not exist: %s", vmDir)
-	}
-
-	return vmDir, nil
 }

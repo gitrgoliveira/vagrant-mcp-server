@@ -22,6 +22,9 @@ Before implementation, review these key documentation sections:
 - #fetch https://github.com/mark3labs/mcp-go/blob/main/www/docs/pages/servers/resources.mdx - MCP-go resources implementation
 - #fetch https://github.com/mark3labs/mcp-go/blob/main/www/docs/pages/servers/advanced.mdx - MCP-go hooks and middleware
 
+**MCP Server Implementation Examples:**
+- #fetch https://github.com/hashicorp/terraform-mcp-server - HashiCorp Terraform MCP server implementation
+
 **Vagrant Documentation:**
 - #fetch https://developer.hashicorp.com/vagrant/docs/vagrantfile - Vagrantfile configuration
 - #fetch https://developer.hashicorp.com/vagrant/docs/synced-folders - Synced folders configuration

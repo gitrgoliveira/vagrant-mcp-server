@@ -6,7 +6,7 @@ import (
 )
 
 // This package contains type aliases and helper functions for working with the MCP-Go library.
-// It's maintained for backwards compatibility and to provide a clean public API.
+// It provides a clean public API interface.
 
 // ToolHandlerFunc is an alias for server.ToolHandlerFunc
 type ToolHandlerFunc = server.ToolHandlerFunc

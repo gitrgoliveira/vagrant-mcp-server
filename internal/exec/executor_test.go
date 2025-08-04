@@ -2,296 +2,248 @@ package exec
 
 import (
 	"context"
-	"errors"
-	"os/exec"
-	"strings"
+	"fmt"
+	"os"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/rs/zerolog/log"
+	"github.com/vagrant-mcp/server/internal/core"
 	syncmod "github.com/vagrant-mcp/server/internal/sync"
+	"github.com/vagrant-mcp/server/internal/testsupport"
+	"github.com/vagrant-mcp/server/internal/utils"
 	"github.com/vagrant-mcp/server/internal/vm"
 )
 
-type mockVMManager struct {
-	createVM  func(name, projectPath string, config vm.VMConfig) error
-	startVM   func(name string) error
-	stopVM    func(name string) error
-	destroyVM func(name string) error
-	getState  func(name string) (vm.State, error)
+// testFixture represents a test environment with real VMs
+type testFixture struct {
+	VMManager   core.VMManager
+	SyncEngine  core.SyncEngine
+	Executor    *Executor
+	baseFixture *testsupport.BaseFixture
+	ctx         context.Context
 }
 
-func (m *mockVMManager) CreateVM(name, projectPath string, config vm.VMConfig) error {
-	if m.createVM != nil {
-		return m.createVM(name, projectPath, config)
+// setupTestFixture creates a new test fixture with real VM manager and sync engine
+func setupTestFixture(t *testing.T, setupVM bool) (*testFixture, error) {
+	// Create context for operations
+	ctx := context.Background()
+
+	// Skip if Vagrant is not installed
+	if err := utils.CheckVagrantInstalled(); err != nil {
+		t.Skipf("Skipping test because Vagrant is not installed: %v", err)
+		return nil, err
 	}
-	return nil
-}
 
-func (m *mockVMManager) StartVM(name string) error {
-	if m.startVM != nil {
-		return m.startVM(name)
+	// Create base fixture
+	baseFixture, err := testsupport.SetupBaseFixture(t, "exec", nil)
+	if err != nil {
+		return nil, err
 	}
-	return nil
-}
 
-func (m *mockVMManager) StopVM(name string) error {
-	if m.stopVM != nil {
-		return m.stopVM(name)
+	// Create VM manager and sync engine
+	vmManager, err := vm.NewManager()
+	if err != nil {
+		baseFixture.Cleanup()
+		return nil, fmt.Errorf("failed to create VM manager: %w", err)
 	}
-	return nil
-}
 
-func (m *mockVMManager) DestroyVM(name string) error {
-	if m.destroyVM != nil {
-		return m.destroyVM(name)
+	syncEngine, err := syncmod.NewEngine()
+	if err != nil {
+		baseFixture.Cleanup()
+		return nil, fmt.Errorf("failed to create sync engine: %w", err)
 	}
-	return nil
-}
 
-func (m *mockVMManager) GetVMState(name string) (vm.State, error) {
-	if m.getState != nil {
-		return m.getState(name)
+	// Create adapters
+	vmAdapter := &VMManagerAdapter{Real: vmManager}
+	syncAdapter := &SyncEngineAdapter{Real: syncEngine}
+
+	// Set VM Manager on Sync Engine
+	syncEngine.SetVMManager(vmAdapter)
+
+	// Create executor
+	executor, err := NewExecutor(vmAdapter, syncAdapter)
+	if err != nil {
+		baseFixture.Cleanup()
+		return nil, fmt.Errorf("failed to create executor: %w", err)
 	}
-	return vm.NotCreated, nil
-}
 
-func (m *mockVMManager) GetSSHConfig(name string) (map[string]string, error) {
-	return map[string]string{
-		"Port":         "2222",
-		"IdentityFile": "/dev/null",
-		"User":         "vagrant",
-		"HostName":     "127.0.0.1",
-	}, nil
-}
+	fixture := &testFixture{
+		VMManager:   vmAdapter,
+		SyncEngine:  syncAdapter,
+		Executor:    executor,
+		baseFixture: baseFixture,
+		ctx:         ctx,
+	}
 
-// Add executeCmd to mockVMManager
-func (m *mockVMManager) ExecuteCommand(name string, cmd string, args []string, workingDir string) (string, string, int, error) {
-	// Use the real command to execute echo
-	if cmd == "echo" && len(args) > 0 && args[0] == "hello" {
-		actualCmd := exec.Command("echo", "hello")
-		output, err := actualCmd.Output()
+	// Setup VM if requested
+	if setupVM {
+		err := fixture.setupVM()
 		if err != nil {
-			return "", "", 1, err
+			baseFixture.Cleanup()
+			return nil, err
 		}
-		return string(output), "", 0, nil
 	}
-	return "stdout", "stderr", 0, nil
+
+	return fixture, nil
 }
 
-func (m *mockVMManager) SyncToVM(name, source, target string) error {
-	return nil
-}
+// setupVM creates and starts a VM for testing
+func (f *testFixture) setupVM() error {
+	// Use standard test configuration from testsupport
+	config := testsupport.GetVMConfig("minimal", f.baseFixture.ProjectPath)
 
-func (m *mockVMManager) SyncFromVM(name, source, target string) error {
-	return nil
-}
-
-func (m *mockVMManager) GetBaseDir() string {
-	return "/mock/base/dir"
-}
-
-func (m *mockVMManager) GetVMConfig(name string) (vm.VMConfig, error) {
-	return vm.VMConfig{}, nil
-}
-
-func (m *mockVMManager) UpdateVMConfig(name string, config vm.VMConfig) error {
-	return nil
-}
-
-func (m *mockVMManager) UploadToVM(name, source, destination string, compress bool, compressionType string) error {
-	return nil
-}
-
-type mockSyncEngine struct {
-	registerVM   func(vmName string) error
-	unregisterVM func(vmName string) error
-}
-
-func (m *mockSyncEngine) RegisterVM(vmName string) error {
-	if m.registerVM != nil {
-		return m.registerVM(vmName)
+	log.Info().Str("vm", f.baseFixture.VMName).Str("path", f.baseFixture.ProjectPath).Msg("Creating VM for test")
+	f.baseFixture.T.Logf("Creating VM %s with project path %s", f.baseFixture.VMName, f.baseFixture.ProjectPath)
+	if err := f.VMManager.CreateVM(f.ctx, f.baseFixture.VMName, f.baseFixture.ProjectPath, config); err != nil {
+		return fmt.Errorf("failed to create VM: %w", err)
 	}
-	return nil
-}
 
-func (m *mockSyncEngine) UnregisterVM(vmName string) error {
-	if m.unregisterVM != nil {
-		return m.unregisterVM(vmName)
+	// Start the VM
+	f.baseFixture.T.Logf("Starting VM %s", f.baseFixture.VMName)
+	if err := f.VMManager.StartVM(f.ctx, f.baseFixture.VMName); err != nil {
+		return fmt.Errorf("failed to start VM: %w", err)
 	}
-	return nil
+
+	// Wait for VM to be ready (this can take a while)
+	f.baseFixture.T.Logf("Waiting for VM %s to be ready", f.baseFixture.VMName)
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		state, err := f.VMManager.GetVMState(f.ctx, f.baseFixture.VMName)
+		if err != nil {
+			f.baseFixture.T.Logf("Error checking VM state: %v", err)
+		} else if state == core.Running {
+			f.baseFixture.T.Logf("VM %s is now running", f.baseFixture.VMName)
+			return nil
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	return fmt.Errorf("timed out waiting for VM to start")
 }
 
-func (m *mockSyncEngine) SyncToVM(vmName string, sourcePath string) (*syncmod.SyncResult, error) {
-	return &syncmod.SyncResult{}, nil
+// cleanup removes the test VM and directories
+func (f *testFixture) cleanup() {
+	if f == nil {
+		return
+	}
+
+	f.baseFixture.T.Logf("Cleaning up test fixture")
+
+	// Try to destroy the VM if it exists
+	if f.baseFixture.VMName != "" {
+		f.baseFixture.T.Logf("Destroying VM %s", f.baseFixture.VMName)
+		if err := f.VMManager.DestroyVM(f.ctx, f.baseFixture.VMName); err != nil {
+			f.baseFixture.T.Logf("Failed to destroy VM: %v", err)
+		}
+	}
+
+	// Clean up the base fixture
+	f.baseFixture.Cleanup()
 }
 
-func (m *mockSyncEngine) SyncFromVM(vmName string, sourcePath string) (*syncmod.SyncResult, error) {
-	return &syncmod.SyncResult{}, nil
-}
-
-func (m *mockSyncEngine) GetSyncStatus(vmName string) (syncmod.SyncStatus, error) {
-	return syncmod.SyncStatus{}, nil
-}
-
-func (m *mockSyncEngine) ResolveSyncConflict(vmName, path, resolution string) error {
-	return nil
-}
-
-func (m *mockSyncEngine) SemanticSearch(vmName, query string, maxResults int) ([]syncmod.SearchResult, error) {
-	return nil, nil
-}
-
-func (m *mockSyncEngine) ExactSearch(vmName, query string, caseSensitive bool, maxResults int) ([]syncmod.SearchResult, error) {
-	return nil, nil
-}
-
-func (m *mockSyncEngine) FuzzySearch(vmName, query string, maxResults int) ([]syncmod.SearchResult, error) {
-	return nil, nil
-}
-
+// TestExecutor_ExecuteCommand tests the ExecuteCommand method with a real VM
 func TestExecutor_ExecuteCommand(t *testing.T) {
-	// Skip test that requires real VM environment
-	t.Skip("Skipping ExecuteCommand test that requires real VM environment")
-
-	testCases := []struct {
-		name           string
-		vmName         string
-		cmd            string
-		args           []string
-		context        *ExecutionContext
-		mockVMManager  func() *mockVMManager
-		mockSync       func() *mockSyncEngine
-		expectError    bool
-		expectedResult *CommandResult
-	}{
-		{
-			name:   "successful command execution",
-			vmName: "test-vm",
-			cmd:    "echo",
-			args:   []string{"hello"},
-			context: &ExecutionContext{
-				VMName:     "test-vm",
-				WorkingDir: "/test",
-				SyncBefore: false,
-				SyncAfter:  false,
-			},
-			mockVMManager: func() *mockVMManager {
-				return &mockVMManager{
-					getState: func(name string) (vm.State, error) {
-						return vm.Running, nil
-					},
-					// We've updated the ExecuteCommand method in mockVMManager to use real commands
-				}
-			},
-			mockSync: func() *mockSyncEngine {
-				return &mockSyncEngine{}
-			},
-			expectError: false,
-			expectedResult: &CommandResult{
-				ExitCode: 0,
-				Stdout:   "hello\n",
-				Stderr:   "",
-				Duration: 0.1,
-			},
-		},
-		{
-			name:   "vm not running",
-			vmName: "test-vm",
-			cmd:    "echo",
-			args:   []string{"hello"},
-			context: &ExecutionContext{
-				VMName:     "test-vm",
-				WorkingDir: "/test",
-			},
-			mockVMManager: func() *mockVMManager {
-				return &mockVMManager{
-					getState: func(name string) (vm.State, error) {
-						return vm.Stopped, nil
-					},
-				}
-			},
-			mockSync: func() *mockSyncEngine {
-				return &mockSyncEngine{}
-			},
-			expectError: true,
-		},
-		{
-			name:   "sync before failure",
-			vmName: "test-vm",
-			cmd:    "echo",
-			args:   []string{"hello"},
-			context: &ExecutionContext{
-				VMName:     "test-vm",
-				WorkingDir: "/test",
-				SyncBefore: true,
-			},
-			mockVMManager: func() *mockVMManager {
-				return &mockVMManager{
-					getState: func(name string) (vm.State, error) {
-						return vm.Running, nil
-					},
-				}
-			},
-			mockSync: func() *mockSyncEngine {
-				return &mockSyncEngine{
-					registerVM: func(vmName string) error {
-						return errors.New("sync failed")
-					},
-				}
-			},
-			expectError: true,
-		},
+	// Skip by default - can be enabled with TEST_LEVEL=integration
+	testLevel := os.Getenv("TEST_LEVEL")
+	if testLevel != "integration" && testLevel != "vm-start" {
+		t.Skip("Skipping integration test. Set TEST_LEVEL=integration to run")
+		return
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			vmManager := tc.mockVMManager()
-			syncEngine := tc.mockSync()
-			executor, err := NewExecutor(vmManager, syncEngine)
-			if err != nil {
-				t.Fatalf("Failed to create executor: %v", err)
-			}
-
-			var outputCalled bool
-			outputCallback := func(data []byte, isStderr bool) {
-				outputCalled = true
-			}
-
-			result, err := executor.ExecuteCommand(context.Background(), tc.cmd, *tc.context, outputCallback)
-
-			if tc.expectError {
-				if err == nil {
-					t.Error("Expected error but got none")
-				}
-			} else {
-				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
-				}
-
-				if !outputCalled {
-					t.Error("Output callback was not called")
-				}
-
-				if result == nil {
-					t.Error("Expected non-nil result")
-					return
-				}
-
-				if tc.expectedResult != nil {
-					if result.ExitCode != tc.expectedResult.ExitCode {
-						t.Errorf("Expected exit code %d, got %d", tc.expectedResult.ExitCode, result.ExitCode)
-					}
-
-					// Allow for some flexibility in duration comparison
-					if result.Duration <= 0 {
-						t.Error("Expected non-zero duration")
-					}
-
-					// Compare stdout/stderr content
-					if strings.TrimSpace(result.Stdout) != strings.TrimSpace(tc.expectedResult.Stdout) {
-						t.Errorf("Expected stdout '%s', got '%s'", tc.expectedResult.Stdout, result.Stdout)
-					}
-				}
-			}
-		})
+	// Setup fixture with a real VM
+	fixture, err := setupTestFixture(t, true)
+	if err != nil {
+		t.Fatalf("Failed to set up test fixture: %v", err)
 	}
+	defer fixture.cleanup()
+
+	// Run a simple echo command in the VM
+	execContext := ExecutionContext{
+		VMName:     fixture.baseFixture.VMName,
+		WorkingDir: "/vagrant",
+		SyncBefore: true,
+		SyncAfter:  true,
+	}
+
+	var outputCalled bool
+	var outputMu sync.Mutex
+	outputCallback := func(data []byte, isStderr bool) {
+		outputMu.Lock()
+		defer outputMu.Unlock()
+		outputCalled = true
+		t.Logf("Output: %s (stderr: %v)", string(data), isStderr)
+	}
+
+	// Execute a simple command
+	result, err := fixture.Executor.ExecuteCommand(context.Background(), "echo", execContext, outputCallback)
+	if err != nil {
+		t.Fatalf("Failed to execute command: %v", err)
+	}
+
+	if !outputCalled {
+		t.Error("Output callback was not called")
+	}
+
+	if result == nil {
+		t.Fatal("Expected non-nil result")
+	}
+
+	if result.ExitCode != 0 {
+		t.Errorf("Expected exit code 0, got %d", result.ExitCode)
+	}
+
+	// Allow for some flexibility in duration comparison
+	if result.Duration <= 0 {
+		t.Error("Expected non-zero duration")
+	}
+
+	t.Logf("Command executed successfully with exit code %d", result.ExitCode)
+}
+
+// TestExecuteCommand_NotRunning tests the behavior when VM is not running
+func TestExecuteCommand_NotRunning(t *testing.T) {
+	// Skip if Vagrant is not installed
+	if err := utils.CheckVagrantInstalled(); err != nil {
+		t.Skip("Skipping test because Vagrant is not installed")
+		return
+	}
+
+	// Skip by default - can be enabled with TEST_LEVEL=integration
+	testLevel := os.Getenv("TEST_LEVEL")
+	if testLevel != "integration" && testLevel != "vm-start" {
+		t.Skip("Skipping integration test. Set TEST_LEVEL=integration to run")
+		return
+	}
+
+	// Setup fixture without VM
+	fixture, err := setupTestFixture(t, false)
+	if err != nil {
+		t.Fatalf("Failed to set up test fixture: %v", err)
+	}
+	defer fixture.cleanup()
+
+	// Create VM but don't start it
+	config := testsupport.GetVMConfig("minimal", fixture.baseFixture.ProjectPath)
+
+	if err := fixture.VMManager.CreateVM(fixture.ctx, fixture.baseFixture.VMName, fixture.baseFixture.ProjectPath, config); err != nil {
+		t.Fatalf("Failed to create VM: %v", err)
+	}
+
+	// Try to execute a command on the non-running VM
+	execContext := ExecutionContext{
+		VMName:     fixture.baseFixture.VMName,
+		WorkingDir: "/vagrant",
+	}
+
+	outputCallback := func(data []byte, isStderr bool) {}
+
+	// This should fail because VM is not running
+	_, err = fixture.Executor.ExecuteCommand(context.Background(), "echo", execContext, outputCallback)
+	if err == nil {
+		t.Fatal("Expected error when VM is not running, but got none")
+	}
+
+	t.Logf("Got expected error when VM is not running: %v", err)
 }

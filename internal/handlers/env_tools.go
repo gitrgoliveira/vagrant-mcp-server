@@ -9,13 +9,20 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/rs/zerolog/log"
+	"github.com/vagrant-mcp/server/internal/core"
+	"github.com/vagrant-mcp/server/internal/errors"
 	"github.com/vagrant-mcp/server/internal/exec"
-	"github.com/vagrant-mcp/server/internal/vm"
+	mcp_pkg "github.com/vagrant-mcp/server/pkg/mcp"
 )
 
 // RegisterEnvTools registers all environment-related tools with the MCP server
-func RegisterEnvTools(srv *server.MCPServer, vmManager exec.VMManager, executor *exec.Executor) {
+func RegisterEnvTools(srv *server.MCPServer, vmManager core.VMManager, executor *exec.Executor) {
 	// Setup dev environment tool
+	type SetupEnvArgs struct {
+		VMName   string   `json:"vm_name"`
+		Runtimes []string `json:"runtimes"`
+		Tools    []string `json:"tools"`
+	}
 	setupEnvTool := mcp.NewTool("setup_dev_environment",
 		mcp.WithDescription("Install language runtimes, tools, and dependencies in the VM"),
 		mcp.WithString("vm_name",
@@ -23,83 +30,34 @@ func RegisterEnvTools(srv *server.MCPServer, vmManager exec.VMManager, executor 
 			mcp.Description("Name of the development VM")),
 		mcp.WithArray("runtimes",
 			mcp.Required(),
-			mcp.Description("Language runtimes to install (e.g., 'node', 'python', 'go', etc.)")),
+			mcp.Description("Language runtimes to install (e.g., 'node', 'python', 'go', etc.)"),
+			mcp.Items(map[string]any{"type": "string"})),
 		mcp.WithArray("tools",
-			mcp.Description("Additional tools to install")),
+			mcp.Description("Additional tools to install"),
+			mcp.Items(map[string]any{"type": "string"})),
 	)
 
-	srv.AddTool(setupEnvTool, handleSetupDevEnvironment(vmManager, executor))
-
-	// Install dev tools tool
-	installToolsTool := mcp.NewTool("install_dev_tools",
-		mcp.WithDescription("Install specific development tools in the VM"),
-		mcp.WithString("vm_name",
-			mcp.Required(),
-			mcp.Description("Name of the development VM")),
-		mcp.WithArray("tools",
-			mcp.Required(),
-			mcp.Description("Tools to install")),
-	)
-
-	srv.AddTool(installToolsTool, handleInstallDevTools(vmManager, executor))
-
-	// Configure shell tool
-	configureShellTool := mcp.NewTool("configure_shell",
-		mcp.WithDescription("Configure shell environment in the VM"),
-		mcp.WithString("vm_name",
-			mcp.Required(),
-			mcp.Description("Name of the development VM")),
-		mcp.WithString("shell_type",
-			mcp.Description("Shell type to configure"),
-			mcp.DefaultString("bash")),
-		mcp.WithArray("aliases",
-			mcp.Description("Shell aliases to configure")),
-		mcp.WithArray("env_vars",
-			mcp.Description("Environment variables to set")),
-	)
-
-	srv.AddTool(configureShellTool, handleConfigureShell(vmManager, executor))
-
-	log.Info().Msg("Environment tools registered")
-}
-
-// handleSetupDevEnvironment handles the setup_dev_environment tool
-func handleSetupDevEnvironment(manager exec.VMManager, executor *exec.Executor) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		vmName, err := request.RequireString("vm_name")
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("missing or invalid 'vm_name' parameter: %v", err)), nil
+	mcp_pkg.RegisterTypedTool(srv, setupEnvTool, func(ctx context.Context, request mcp.CallToolRequest, args SetupEnvArgs) (*mcp.CallToolResult, error) {
+		if args.VMName == "" {
+			return mcp.NewToolResultError("missing or invalid 'vm_name' parameter"), nil
 		}
-
-		runtimesObj := request.GetArguments()["runtimes"]
-		var runtimes []string
-
-		if runtimesList, ok := runtimesObj.([]interface{}); ok {
-			for _, rt := range runtimesList {
-				if rtStr, ok := rt.(string); ok {
-					runtimes = append(runtimes, rtStr)
-				}
-			}
-		}
-
-		if len(runtimes) == 0 {
+		if len(args.Runtimes) == 0 {
 			return mcp.NewToolResultError("missing or invalid 'runtimes' parameter"), nil
 		}
-
 		// Check VM state
-		state, err := manager.GetVMState(vmName)
+		state, err := vmManager.GetVMState(ctx, args.VMName)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' does not exist: %v", vmName, err)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' does not exist: %v", args.VMName, err)), nil
 		}
 
-		if state != vm.Running {
-			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' is not running (current state: %s)", vmName, state)), nil
+		if state != core.Running {
+			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' is not running (current state: %s)", args.VMName, state)), nil
 		}
 
 		// Process each runtime
 		results := make(map[string]interface{})
-		for _, runtime := range runtimes {
-			cmdResult, err := installRuntime(ctx, executor, vmName, runtime)
+		for _, runtime := range args.Runtimes {
+			cmdResult, err := installRuntime(ctx, executor, args.VMName, runtime)
 			results[runtime] = map[string]interface{}{
 				"success": err == nil,
 				"output":  cmdResult,
@@ -122,7 +80,7 @@ func handleSetupDevEnvironment(manager exec.VMManager, executor *exec.Executor) 
 		if len(tools) > 0 {
 			toolResults := make(map[string]interface{})
 			for _, tool := range tools {
-				cmdResult, err := installTool(ctx, executor, vmName, tool)
+				cmdResult, err := installTool(ctx, executor, args.VMName, tool)
 				toolResults[tool] = map[string]interface{}{
 					"success": err == nil,
 					"output":  cmdResult,
@@ -133,17 +91,47 @@ func handleSetupDevEnvironment(manager exec.VMManager, executor *exec.Executor) 
 		}
 
 		// Return results
-		jsonData, err := json.Marshal(results)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to marshal results: %v", err)), nil
-		}
+		return mcp.NewToolResultText(fmt.Sprintf("%v", results)), nil
+	})
 
-		return mcp.NewToolResultText(string(jsonData)), nil
-	}
+	// Install dev tools tool
+	installToolsTool := mcp.NewTool("install_dev_tools",
+		mcp.WithDescription("Install specific development tools in the VM"),
+		mcp.WithString("vm_name",
+			mcp.Required(),
+			mcp.Description("Name of the development VM")),
+		mcp.WithArray("tools",
+			mcp.Required(),
+			mcp.Description("Tools to install"),
+			mcp.Items(map[string]any{"type": "string"})),
+	)
+
+	srv.AddTool(installToolsTool, handleInstallDevTools(vmManager, executor))
+
+	// Configure shell tool
+	configureShellTool := mcp.NewTool("configure_shell",
+		mcp.WithDescription("Configure shell environment in the VM"),
+		mcp.WithString("vm_name",
+			mcp.Required(),
+			mcp.Description("Name of the development VM")),
+		mcp.WithString("shell_type",
+			mcp.Description("Shell type to configure"),
+			mcp.DefaultString("bash")),
+		mcp.WithArray("aliases",
+			mcp.Description("Shell aliases to configure"),
+			mcp.Items(map[string]any{"type": "string"})),
+		mcp.WithArray("env_vars",
+			mcp.Description("Environment variables to set"),
+			mcp.Items(map[string]any{"type": "string"})),
+	)
+
+	srv.AddTool(configureShellTool, handleConfigureShell(vmManager, executor))
+
+	log.Info().Msg("Environment tools registered")
 }
 
 // handleInstallDevTools handles the install_dev_tools tool
-func handleInstallDevTools(manager exec.VMManager, executor *exec.Executor) server.ToolHandlerFunc {
+func handleInstallDevTools(manager core.VMManager, executor *exec.Executor) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		vmName, err := request.RequireString("vm_name")
 		if err != nil {
@@ -166,12 +154,12 @@ func handleInstallDevTools(manager exec.VMManager, executor *exec.Executor) serv
 		}
 
 		// Check VM state
-		state, err := manager.GetVMState(vmName)
+		state, err := manager.GetVMState(ctx, vmName)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' does not exist: %v", vmName, err)), nil
 		}
 
-		if state != vm.Running {
+		if state != core.Running {
 			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' is not running (current state: %s)", vmName, state)), nil
 		}
 
@@ -189,15 +177,14 @@ func handleInstallDevTools(manager exec.VMManager, executor *exec.Executor) serv
 		// Return results
 		jsonData, err := json.Marshal(results)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to marshal results: %v", err)), nil
+			return mcp.NewToolResultError("failed to marshal result: " + err.Error()), nil
 		}
-
 		return mcp.NewToolResultText(string(jsonData)), nil
 	}
 }
 
 // handleConfigureShell handles the configure_shell tool
-func handleConfigureShell(manager exec.VMManager, executor *exec.Executor) server.ToolHandlerFunc {
+func handleConfigureShell(manager core.VMManager, executor *exec.Executor) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		vmName, err := request.RequireString("vm_name")
 		if err != nil {
@@ -207,12 +194,12 @@ func handleConfigureShell(manager exec.VMManager, executor *exec.Executor) serve
 		shellType := request.GetString("shell_type", "bash")
 
 		// Check VM state
-		state, err := manager.GetVMState(vmName)
+		state, err := manager.GetVMState(ctx, vmName)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' does not exist: %v", vmName, err)), nil
 		}
 
-		if state != vm.Running {
+		if state != core.Running {
 			return mcp.NewToolResultError(fmt.Sprintf("VM '%s' is not running (current state: %s)", vmName, state)), nil
 		}
 
@@ -282,7 +269,7 @@ func installRuntime(ctx context.Context, executor *exec.Executor, vmName string,
 	case "java":
 		cmd = "sudo apt-get update && sudo apt-get install -y default-jdk"
 	default:
-		return "", fmt.Errorf("unsupported runtime: %s", runtime)
+		return "", errors.InvalidInput(fmt.Sprintf("unsupported runtime: %s", runtime))
 	}
 
 	// Setup execution context
@@ -296,7 +283,7 @@ func installRuntime(ctx context.Context, executor *exec.Executor, vmName string,
 	// Execute the command
 	result, err := executor.ExecuteCommand(ctx, cmd, execCtx, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to install %s: %w", runtime, err)
+		return "", errors.OperationFailed("install runtime", err)
 	}
 
 	return result.Stdout, nil
@@ -339,7 +326,7 @@ func installTool(ctx context.Context, executor *exec.Executor, vmName string, to
 	// Execute the command
 	result, err := executor.ExecuteCommand(ctx, cmd, execCtx, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to install %s: %w", tool, err)
+		return "", errors.OperationFailed("install tool", err)
 	}
 
 	return result.Stdout, nil
@@ -354,7 +341,7 @@ func configureShellEnv(ctx context.Context, executor *exec.Executor, vmName stri
 	case "zsh":
 		rcFile = "/home/vagrant/.zshrc"
 	default:
-		return "", fmt.Errorf("unsupported shell type: %s", shellType)
+		return "", errors.InvalidInput(fmt.Sprintf("unsupported shell type: %s", shellType))
 	}
 
 	// Setup execution context
@@ -389,12 +376,12 @@ func configureShellEnv(ctx context.Context, executor *exec.Executor, vmName stri
 	appendCmd := fmt.Sprintf("echo '%s' >> %s", config.String(), rcFile)
 	result, err := executor.ExecuteCommand(ctx, appendCmd, execCtx, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to configure shell: %w", err)
+		return "", errors.OperationFailed("configure shell", err)
 	}
 
 	// Source the file to apply changes
 	sourceCmd := fmt.Sprintf("source %s", rcFile)
-	_, _ = executor.ExecuteCommand(ctx, sourceCmd, execCtx, nil) //nolint:errcheck
+	_, _ = executor.ExecuteCommand(ctx, sourceCmd, execCtx, nil)
 
 	return result.Stdout, nil
 }

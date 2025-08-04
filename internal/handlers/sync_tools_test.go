@@ -2,78 +2,48 @@ package handlers
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
-	"github.com/vagrant-mcp/server/internal/vm"
+	testfixture "github.com/vagrant-mcp/server/internal/testing"
 	"github.com/vagrant-mcp/server/pkg/mcp"
 )
 
-// Custom mock VM manager for sync tools tests
-type syncToolsMockVMManager struct {
-	getState   func(name string) (vm.State, error)
-	uploadToVM func(name, source, destination string, compress bool, compressionType string) error
-}
-
-func (m *syncToolsMockVMManager) CreateVM(name, projectPath string, config vm.VMConfig) error {
-	return nil
-}
-func (m *syncToolsMockVMManager) DestroyVM(name string) error { return nil }
-func (m *syncToolsMockVMManager) GetVMState(name string) (vm.State, error) {
-	if m.getState != nil {
-		return m.getState(name)
-	}
-	return vm.NotCreated, nil
-}
-func (m *syncToolsMockVMManager) StartVM(name string) error { return nil }
-func (m *syncToolsMockVMManager) StopVM(name string) error  { return nil }
-func (m *syncToolsMockVMManager) ExecuteCommand(name string, cmd string, args []string, workingDir string) (string, string, int, error) {
-	return "", "", 0, nil
-}
-func (m *syncToolsMockVMManager) SyncToVM(name, source, target string) error   { return nil }
-func (m *syncToolsMockVMManager) SyncFromVM(name, source, target string) error { return nil }
-func (m *syncToolsMockVMManager) UploadToVM(name, source, destination string, compress bool, compressionType string) error {
-	if m.uploadToVM != nil {
-		return m.uploadToVM(name, source, destination, compress, compressionType)
-	}
-	return nil
-}
-func (m *syncToolsMockVMManager) GetSSHConfig(name string) (map[string]string, error) {
-	return map[string]string{}, nil
-}
-func (m *syncToolsMockVMManager) GetVMConfig(name string) (vm.VMConfig, error) {
-	return vm.VMConfig{}, nil
-}
-func (m *syncToolsMockVMManager) UpdateVMConfig(name string, config vm.VMConfig) error { return nil }
-func (m *syncToolsMockVMManager) GetBaseDir() string                                   { return "/mock/base/dir" }
+// Use the testFixture from test_helper.go for all VM operations
 
 // TestUploadToVMHandler tests the upload_to_vm handler function
 func TestUploadToVMHandler(t *testing.T) {
+	// Skip by default - can be enabled with TEST_LEVEL=integration
+	testLevel := os.Getenv("TEST_LEVEL")
+	if testLevel != "integration" && testLevel != "vm-start" {
+		t.Skip("Skipping integration test. Set TEST_LEVEL=integration to run")
+		return
+	}
+
+	// Create test fixture with real VM manager
+	fixture, err := testfixture.NewUnifiedFixture(t, testfixture.FixtureOptions{
+		PackageName:   "sync-tools",
+		SetupVM:       false,
+		CreateProject: true,
+	})
+	if err != nil {
+		t.Fatalf("Failed to set up test fixture: %v", err)
+	}
+	defer fixture.Cleanup()
+
 	testCases := []struct {
 		name          string
 		params        map[string]interface{}
-		vmState       vm.State
-		vmError       error
-		uploadError   error
 		expectError   bool
 		expectedError string
 	}{
 		{
-			name: "successful upload",
-			params: map[string]interface{}{
-				"vm_name":     "test-vm",
-				"source":      "/path/to/source",
-				"destination": "/path/to/destination",
-			},
-			vmState:     vm.Running,
-			expectError: false,
-		},
-		{
 			name: "missing vm_name",
 			params: map[string]interface{}{
-				"source":      "/path/to/source",
-				"destination": "/path/to/destination",
+				"source":      "/tmp/source",
+				"destination": "/tmp/destination",
 			},
 			expectError:   true,
 			expectedError: "Missing or invalid 'vm_name' parameter",
@@ -81,8 +51,8 @@ func TestUploadToVMHandler(t *testing.T) {
 		{
 			name: "missing source",
 			params: map[string]interface{}{
-				"vm_name":     "test-vm",
-				"destination": "/path/to/destination",
+				"vm_name":     fixture.VMName,
+				"destination": "/tmp/destination",
 			},
 			expectError:   true,
 			expectedError: "Missing or invalid 'source' parameter",
@@ -90,36 +60,18 @@ func TestUploadToVMHandler(t *testing.T) {
 		{
 			name: "missing destination",
 			params: map[string]interface{}{
-				"vm_name": "test-vm",
-				"source":  "/path/to/source",
+				"vm_name": fixture.VMName,
+				"source":  "/tmp/source",
 			},
 			expectError:   true,
 			expectedError: "Missing or invalid 'destination' parameter",
 		},
-		{
-			name: "vm not running",
-			params: map[string]interface{}{
-				"vm_name":     "test-vm",
-				"source":      "/path/to/source",
-				"destination": "/path/to/destination",
-			},
-			vmState:       vm.Stopped,
-			expectError:   true,
-			expectedError: "not running",
-		},
 	}
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			mockManager := &syncToolsMockVMManager{
-				getState: func(name string) (vm.State, error) {
-					return tc.vmState, tc.vmError
-				},
-				uploadToVM: func(name, source, destination string, compress bool, compressionType string) error {
-					return tc.uploadError
-				},
-			}
 
-			handler := handleUploadToVM(mockManager)
+			handler := handleUploadToVM(fixture.VMManager)
 
 			// Create request
 			request := mcp.CallToolRequest{

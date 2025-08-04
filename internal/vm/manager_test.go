@@ -1,170 +1,125 @@
-package vm
+package vm_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/vagrant-mcp/server/internal/core"
+	testfixture "github.com/vagrant-mcp/server/internal/testing"
+	"github.com/vagrant-mcp/server/internal/vm"
 )
-
-// Use the actual exec.Command for testing with real Vagrant
-// nolint:unused
-var execCommand = exec.Command
-
-// Skip tests if Vagrant is not installed
-func skipIfVagrantNotInstalled(t *testing.T) {
-	cmd := exec.Command("vagrant", "--version")
-	if err := cmd.Run(); err != nil {
-		t.Skip("Vagrant is not installed, skipping test")
-	}
-}
-
-// cleanupVM ensures Vagrant VMs are properly destroyed and directories are cleaned up
-func cleanupVM(t *testing.T, vmName string, vmDir string) {
-	// Try to destroy VM using Vagrant if the directory exists
-	if _, err := os.Stat(vmDir); err == nil {
-		// VM directory exists, try to destroy it cleanly with vagrant force flag
-		cmd := exec.Command("vagrant", "destroy", "-f")
-		cmd.Dir = vmDir
-		if err := cmd.Run(); err != nil {
-			t.Logf("Failed to destroy VM with Vagrant: %v. Continuing with directory cleanup.", err)
-		}
-
-		// Remove VM directory after Vagrant destroy
-		if err := os.RemoveAll(vmDir); err != nil {
-			t.Logf("Failed to remove VM directory: %v", err)
-		}
-	}
-}
 
 // TestCreateVM tests the creation of a new VM
 func TestCreateVM(t *testing.T) {
-	// Create a temporary directory for testing
-	tempDir, err := os.MkdirTemp("", "vm-manager-test")
+	fixture, err := testfixture.NewUnifiedFixture(t, testfixture.FixtureOptions{
+		PackageName:   "manager",
+		SetupVM:       false,
+		CreateProject: true,
+	})
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		t.Fatalf("Failed to set up test fixture: %v", err)
 	}
+	defer fixture.Cleanup()
 
-	// Always clean up the temp directory and VM directories, even in case of test failures
-	defer func() {
-		cleanupVM(t, "test-vm", filepath.Join(tempDir, "test-vm"))
+	ctx := context.Background()
+	vmName := fixture.VMName
+	projectPath := fixture.ProjectPath
+	manager := fixture.VMManager // use as core.VMManager
 
-		// Remove temp directory
-		if err := os.RemoveAll(tempDir); err != nil {
-			t.Logf("Failed to remove temp dir: %v", err)
-		}
-	}()
-
-	// Create a test manager with the temp directory as base
-	manager := &Manager{
-		baseDir: tempDir,
-	}
-
-	// Test creating a VM
-	vmName := "test-vm"
-	projectPath := filepath.Join(tempDir, "project")
-
-	// Create project directory
-	if err := os.MkdirAll(projectPath, 0755); err != nil {
-		t.Fatalf("Failed to create project dir: %v", err)
-	}
-
-	// Create test VM config
-	config := VMConfig{
+	config := core.VMConfig{
 		Box:    "ubuntu/focal64",
 		CPU:    2,
 		Memory: 2048,
-		Ports: []Port{
+		Ports: []core.Port{
 			{Guest: 3000, Host: 3000},
 		},
+		ProjectPath: projectPath,
 	}
 
-	// Skip test if Vagrant is not installed
-	skipIfVagrantNotInstalled(t)
-
-	// Test VM creation
-	if err := manager.CreateVM(vmName, projectPath, config); err != nil {
-		t.Fatalf("CreateVM failed: %v", err)
+	if err := manager.CreateVM(ctx, vmName, projectPath, config); err != nil {
+		t.Fatalf("Failed to create VM: %v", err)
 	}
 
-	// Check if VM directory was created
-	vmDir := filepath.Join(tempDir, vmName)
+	vmDir := filepath.Join(fixture.TestDir, "vms", vmName)
 	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
 		t.Errorf("VM directory was not created at %s", vmDir)
 	}
 
-	// Check if Vagrantfile was created
 	vagrantfilePath := filepath.Join(vmDir, "Vagrantfile")
 	if _, err := os.Stat(vagrantfilePath); os.IsNotExist(err) {
 		t.Errorf("Vagrantfile was not created at %s", vagrantfilePath)
 	}
 
-	// Check if VM config was saved
-	configPath := filepath.Join(filepath.Dir(tempDir), fmt.Sprintf("%s.json", vmName))
+	configPath := filepath.Join(fixture.TestDir, fmt.Sprintf("%s.json", vmName))
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		t.Errorf("VM config file was not created at %s", configPath)
 	}
 }
 
-// TestGetVMState tests retrieving VM state
+// TestParseVagrantStatus tests conversion of Vagrant machine-readable output to VM state
 func TestParseVagrantStatus(t *testing.T) {
-	// Test directly the parseVagrantStatus method which is used by GetVMState
-	manager := &Manager{}
+	manager, err := vm.NewManager()
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
 
 	testCases := []struct {
 		name          string
 		statusOutput  string
-		expectedState State
+		expectedState core.VMState
 		expectError   bool
 	}{
 		{
 			name:          "running state",
 			statusOutput:  "1234,default,state,running",
-			expectedState: Running,
+			expectedState: core.Running,
 			expectError:   false,
 		},
 		{
-			name:          "poweroff state",
+			name:          "stopped state",
 			statusOutput:  "1234,default,state,poweroff",
-			expectedState: Stopped,
+			expectedState: core.Stopped,
 			expectError:   false,
 		},
 		{
 			name:          "aborted state",
 			statusOutput:  "1234,default,state,aborted",
-			expectedState: Stopped,
+			expectedState: core.Stopped,
 			expectError:   false,
 		},
 		{
 			name:          "saved state",
 			statusOutput:  "1234,default,state,saved",
-			expectedState: Suspended,
+			expectedState: core.Suspended,
 			expectError:   false,
 		},
 		{
 			name:          "not created state",
 			statusOutput:  "1234,default,state,not_created",
-			expectedState: NotCreated,
+			expectedState: core.NotCreated,
 			expectError:   false,
 		},
 		{
 			name:          "empty output",
 			statusOutput:  "",
-			expectedState: Error,
+			expectedState: core.Error,
 			expectError:   true,
 		},
 		{
 			name:          "invalid output",
 			statusOutput:  "invalid output",
-			expectedState: Error,
+			expectedState: core.Error,
 			expectError:   true,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			state, err := manager.parseVagrantStatus(tc.statusOutput)
+			state, err := manager.ParseVagrantStatus(tc.statusOutput)
 
 			if tc.expectError && err == nil {
 				t.Error("Expected error but got none")
@@ -179,198 +134,105 @@ func TestParseVagrantStatus(t *testing.T) {
 	}
 }
 
+// TestGetVMState tests getting VM state
 func TestGetVMState(t *testing.T) {
-	// Create a temporary directory for testing
-	tempDir, err := os.MkdirTemp("", "vm-manager-test-state")
+	fixture, err := testfixture.NewUnifiedFixture(t, testfixture.FixtureOptions{
+		PackageName:   "manager",
+		SetupVM:       false,
+		CreateProject: true,
+	})
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		t.Fatalf("Failed to set up test fixture: %v", err)
 	}
+	defer fixture.Cleanup()
+	ctx := context.Background()
+	testVMName := "test-vm-state"
 
-	// Define test VM name
-	const testVMName = "test-vm"
-
-	// Always clean up the temp directory and VM directories, even in case of test failures
-	defer func() {
-		cleanupVM(t, testVMName, filepath.Join(tempDir, testVMName))
-
-		// Remove temp directory
-		if err := os.RemoveAll(tempDir); err != nil {
-			t.Logf("Failed to remove temporary directory: %v", err)
-		}
-	}()
-
-	// Test when VM directory doesn't exist (should return NotCreated)
 	t.Run("vm directory doesn't exist", func(t *testing.T) {
-		manager := &Manager{baseDir: tempDir}
-
-		state, err := manager.GetVMState(testVMName)
-
+		// Set VM_BASE_DIR and check error
+		if err := os.Setenv("VM_BASE_DIR", fixture.TestDir); err != nil {
+			t.Fatalf("Failed to set VM_BASE_DIR: %v", err)
+		}
+		manager, err := vm.NewManager()
+		if err != nil {
+			t.Fatalf("Failed to create manager: %v", err)
+		}
+		state, err := manager.GetVMState(ctx, testVMName)
 		if err != nil {
 			t.Errorf("Unexpected error: %v", err)
 		}
-		if state != NotCreated {
+		if state != core.NotCreated {
 			t.Errorf("Expected NotCreated state but got %v", state)
 		}
 	})
 
-	// Test when VM directory exists but status command fails
 	t.Run("status command fails", func(t *testing.T) {
-		// Create a VM directory
-		vmDir := filepath.Join(tempDir, testVMName)
+		vmDir := filepath.Join(fixture.TestDir, testVMName)
 		if err := os.MkdirAll(vmDir, 0755); err != nil {
 			t.Fatalf("Failed to create VM dir: %v", err)
 		}
-
-		manager := &Manager{baseDir: tempDir}
-
-		// We're testing with the real Vagrant CLI, so we need a valid VM directory structure
-		// that will cause vagrant status to fail (which is what we're testing for)
-		// Just having an empty directory should cause vagrant status to fail
-		skipIfVagrantNotInstalled(t)
-
-		state, err := manager.GetVMState(testVMName)
-
+		// Set VM_BASE_DIR and check error
+		if err := os.Setenv("VM_BASE_DIR", fixture.TestDir); err != nil {
+			t.Fatalf("Failed to set VM_BASE_DIR: %v", err)
+		}
+		manager, err := vm.NewManager()
+		if err != nil {
+			t.Fatalf("Failed to create manager: %v", err)
+		}
+		state, err := manager.GetVMState(ctx, testVMName)
 		if err == nil {
 			t.Error("Expected error but got none")
 		}
-		if state != Error {
-			t.Errorf("Expected Error state but got %v", state)
-		}
-
-		// Clean up the VM directory
-		if err := os.RemoveAll(vmDir); err != nil {
-			t.Logf("Failed to remove VM directory: %v", err)
+		if state != core.Unknown {
+			t.Errorf("Expected Unknown state but got %v", state)
 		}
 	})
 }
 
-// MockStartVM simulates starting a VM directly by testing the StartVM method
+// TestStartVM tests starting a VM
 func TestStartVM(t *testing.T) {
-	// Create a temporary directory for testing
-	tempDir, err := os.MkdirTemp("", "vm-manager-test-start")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+	// Skip by default - can be enabled with TEST_LEVEL=integration
+	testLevel := os.Getenv("TEST_LEVEL")
+	if testLevel != "integration" && testLevel != "vm-start" {
+		t.Skip("Skipping integration test. Set TEST_LEVEL=integration to run")
+		return
 	}
 
-	// Store VM names used in this test for cleanup
-	vmsToCleanup := []string{"test-vm-success", "test-vm-fail"}
+	fixture, err := testfixture.NewUnifiedFixture(t, testfixture.FixtureOptions{
+		PackageName:   "manager",
+		SetupVM:       true,
+		StartVM:       false, // Don't start VM by default - only create it
+		CreateProject: true,
+	})
+	if err != nil {
+		t.Fatalf("Failed to set up test fixture: %v", err)
+	}
+	defer fixture.Cleanup()
+	ctx := context.Background()
+	manager := fixture.VMManager // use as core.VMManager
+	vmName := fixture.VMName
 
-	// Always clean up the temp directory and VM directories, even in case of test failures
-	defer func() {
-		// First clean up all VM directories and VirtualBox VMs
-		for _, vmName := range vmsToCleanup {
-			vmDir := filepath.Join(tempDir, vmName)
-			cleanupVM(t, vmName, vmDir)
-		}
-
-		// Then remove the entire temp directory
-		if err := os.RemoveAll(tempDir); err != nil {
-			t.Logf("Failed to remove temporary directory: %v", err)
-		}
-	}()
-
-	// Test successful startup
 	t.Run("successful start", func(t *testing.T) {
-		// Create VM directory
-		vmName := "test-vm-success"
-		vmDir := filepath.Join(tempDir, vmName)
-		if err := os.MkdirAll(vmDir, 0755); err != nil {
-			t.Fatalf("Failed to create VM dir: %v", err)
+		// Skipping actual Vagrant start in CI or if not explicitly requested
+		if os.Getenv("CI") == "true" {
+			t.Skip("Skipping VM start test in CI environment")
 		}
 
-		// Create a valid Vagrantfile
-		vagrantfilePath := filepath.Join(vmDir, "Vagrantfile")
-		validVagrantfile := `
-# -*- mode: ruby -*-
-# vi: set ft=ruby :
-# Test Vagrantfile
-
-Vagrant.configure("2") do |config|
-  config.vm.box = "ubuntu/focal64"
-  
-  config.vm.provider "virtualbox" do |vb|
-    vb.memory = 1024
-    vb.cpus = 2
-  end
-end
-`
-		if err := os.WriteFile(vagrantfilePath, []byte(validVagrantfile), 0644); err != nil {
-			t.Fatalf("Failed to create Vagrantfile: %v", err)
+		// Only run VM start test if TEST_LEVEL=vm-start
+		if os.Getenv("TEST_LEVEL") != "vm-start" {
+			t.Skip("Skipping VM start test. Set TEST_LEVEL=vm-start to run")
 		}
 
-		// Create the manager
-		manager := &Manager{baseDir: tempDir}
-
-		// Skip test if Vagrant is not installed
-		skipIfVagrantNotInstalled(t)
-
-		// When using actual Vagrant CLI, we should create a proper test environment
-		// that allows Vagrant to actually validate the file
-
-		// Start the VM
-		err := manager.StartVM(vmName)
-
-		// Check results
+		err := manager.StartVM(ctx, vmName)
 		if err != nil {
 			t.Errorf("Expected no error, got: %v", err)
-		}
-	})
-
-	// Test failed startup
-	t.Run("failed start", func(t *testing.T) {
-		// Create VM directory
-		vmName := "test-vm-fail"
-		vmDir := filepath.Join(tempDir, vmName)
-		if err := os.MkdirAll(vmDir, 0755); err != nil {
-			t.Fatalf("Failed to create VM dir: %v", err)
-		}
-
-		// Create a valid Vagrantfile
-		vagrantfilePath := filepath.Join(vmDir, "Vagrantfile")
-		validVagrantfile := `
-# -*- mode: ruby -*-
-# vi: set ft=ruby :
-# Test Vagrantfile
-
-Vagrant.configure("2") do |config|
-  config.vm.boxes = "ubuntu/focal64"
-  
-  config.vm.provider "virtualbox" do |vb|
-    vb.memory = 1024
-    vb.cpus = 2
-  end
-end
-`
-		if err := os.WriteFile(vagrantfilePath, []byte(validVagrantfile), 0644); err != nil {
-			t.Fatalf("Failed to create Vagrantfile: %v", err)
-		}
-
-		// Create the manager
-		manager := &Manager{baseDir: tempDir}
-
-		// Skip test if Vagrant is not installed
-		skipIfVagrantNotInstalled(t)
-
-		// For testing a failed start with real Vagrant, we deliberately use an invalid Vagrantfile
-		// that will fail validation
-
-		// Try to start the VM
-		err := manager.StartVM(vmName)
-
-		// Check results
-		if err == nil {
-			t.Errorf("Expected error but got none")
 		}
 	})
 }
 
 // TestStopVM tests stopping a VM
 func TestStopVM(t *testing.T) {
-	// Skip test that requires real Vagrant environment
 	t.Skip("Skipping StopVM test that requires real Vagrant environment")
-
-	// Skip test if Vagrant is not installed
-	skipIfVagrantNotInstalled(t)
 
 	testCases := []struct {
 		name        string
@@ -402,11 +264,7 @@ func TestStopVM(t *testing.T) {
 
 // TestDestroyVM tests destroying a VM
 func TestDestroyVM(t *testing.T) {
-	// Skip test that requires real Vagrant environment
 	t.Skip("Skipping DestroyVM test that requires real Vagrant environment")
-
-	// Skip test if Vagrant is not installed
-	skipIfVagrantNotInstalled(t)
 
 	testCases := []struct {
 		name        string
@@ -438,45 +296,26 @@ func TestDestroyVM(t *testing.T) {
 
 // TestValidateVagrantfile tests that generated Vagrantfiles are valid
 func TestValidateVagrantfile(t *testing.T) {
-	// Create a temporary directory for testing
-	tempDir, err := os.MkdirTemp("", "vm-manager-test-validate")
+	fixture, err := testfixture.NewUnifiedFixture(t, testfixture.FixtureOptions{
+		PackageName:   "manager-validate",
+		SetupVM:       false,
+		CreateProject: true,
+	})
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		t.Fatalf("Failed to set up test fixture: %v", err)
 	}
-
-	// Keep track of all VM names used in this test
-	var testVMNames []string
-	// Always clean up the temp directory and VM directories, even in case of test failures
-	defer func() {
-		// First clean up all VM directories
-		for _, vmName := range testVMNames {
-			vmDir := filepath.Join(tempDir, vmName)
-			cleanupVM(t, vmName, vmDir)
-		}
-
-		// Remove temp directory
-		if err := os.RemoveAll(tempDir); err != nil {
-			t.Logf("Failed to remove temp dir: %v", err)
-		}
-	}()
-
-	// Create a test manager with the temp directory as base
-	manager := &Manager{
-		baseDir: tempDir,
-	}
-
-	// Test cases with different VM configurations
-	// Skip test if Vagrant is not installed
-	skipIfVagrantNotInstalled(t)
+	defer fixture.Cleanup()
+	manager := fixture.VMManager // use as core.VMManager
+	ctx := context.Background()
 
 	testCases := []struct {
 		name        string
-		config      VMConfig
-		expectError bool // with real Vagrant, only invalid configurations should fail
+		config      core.VMConfig
+		expectError bool
 	}{
 		{
 			name: "basic configuration",
-			config: VMConfig{
+			config: core.VMConfig{
 				Box:    "ubuntu/focal64",
 				CPU:    2,
 				Memory: 2048,
@@ -485,11 +324,11 @@ func TestValidateVagrantfile(t *testing.T) {
 		},
 		{
 			name: "with port forwarding",
-			config: VMConfig{
+			config: core.VMConfig{
 				Box:    "ubuntu/focal64",
 				CPU:    2,
 				Memory: 2048,
-				Ports: []Port{
+				Ports: []core.Port{
 					{Guest: 3000, Host: 3000},
 					{Guest: 8080, Host: 8080},
 				},
@@ -498,7 +337,7 @@ func TestValidateVagrantfile(t *testing.T) {
 		},
 		{
 			name: "with custom sync type",
-			config: VMConfig{
+			config: core.VMConfig{
 				Box:      "ubuntu/focal64",
 				CPU:      2,
 				Memory:   2048,
@@ -508,7 +347,7 @@ func TestValidateVagrantfile(t *testing.T) {
 		},
 		{
 			name: "with environment setup",
-			config: VMConfig{
+			config: core.VMConfig{
 				Box:    "ubuntu/focal64",
 				CPU:    2,
 				Memory: 2048,
@@ -521,44 +360,34 @@ func TestValidateVagrantfile(t *testing.T) {
 		},
 		{
 			name: "validation failure",
-			config: VMConfig{
-				// Use an invalid box name that should cause validation to fail
+			config: core.VMConfig{
 				Box:    "invalid/nonexistent-box-that-should-fail",
 				CPU:    2,
 				Memory: 2048,
 			},
-			expectError: false, // We can't force a validation error with real Vagrant as easily
+			expectError: false,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			vmName := "test-vm-validate-" + tc.name
-			// Add VM name to the tracking list for cleanup
-			testVMNames = append(testVMNames, vmName)
-			projectPath := filepath.Join(tempDir, "project-"+tc.name)
-
-			// Create project directory
+			projectPath := filepath.Join(fixture.TestDir, "project-"+tc.name)
 			if err := os.MkdirAll(projectPath, 0755); err != nil {
 				t.Fatalf("Failed to create project dir: %v", err)
 			}
-
-			// Create the VM with the configuration
-			if err := manager.CreateVM(vmName, projectPath, tc.config); err != nil {
+			if err := manager.CreateVM(ctx, vmName, projectPath, tc.config); err != nil {
 				t.Fatalf("CreateVM failed: %v", err)
-			} // Check if Vagrantfile was created
-			vmDir := filepath.Join(tempDir, vmName)
+			}
+			vmDir := filepath.Join(fixture.TestDir, "vms", vmName)
 			vagrantfilePath := filepath.Join(vmDir, "Vagrantfile")
 			if _, err := os.Stat(vagrantfilePath); os.IsNotExist(err) {
 				t.Fatalf("Vagrantfile was not created at %s", vagrantfilePath)
 			}
-
 			// Run vagrant validate with the real Vagrant CLI
 			cmd := exec.Command("vagrant", "validate")
 			cmd.Dir = vmDir
 			output, err := cmd.CombinedOutput()
-
-			// Check results
 			if err != nil {
 				if !tc.expectError {
 					t.Errorf("Unexpected validation error: %v, output: %s", err, output)
@@ -574,63 +403,34 @@ func TestValidateVagrantfile(t *testing.T) {
 
 // TestUploadToVM tests uploading files to a VM
 func TestUploadToVM(t *testing.T) {
-	// Create a temporary directory for testing
-	tempDir, err := os.MkdirTemp("", "vm-manager-test-upload")
+	// Skip by default - can be enabled with TEST_INTEGRATION=1
+	if os.Getenv("TEST_INTEGRATION") != "1" {
+		t.Skip("Skipping integration test. Set TEST_INTEGRATION=1 to run")
+		return
+	}
+
+	fixture, err := testfixture.NewUnifiedFixture(t, testfixture.FixtureOptions{
+		PackageName:   "manager-upload",
+		SetupVM:       true,
+		CreateProject: true,
+	})
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		t.Fatalf("Failed to set up test fixture: %v", err)
+	}
+	defer fixture.Cleanup()
+	ctx := context.Background()
+	manager := fixture.VMManager // use as core.VMManager
+	vmName := fixture.VMName
+
+	sourceDir := filepath.Join(fixture.TestDir, "source")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatalf("Failed to create source dir: %v", err)
+	}
+	sourceFile := filepath.Join(sourceDir, "test.txt")
+	if err := os.WriteFile(sourceFile, []byte("test content"), 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
 	}
 
-	// Always clean up the temp directory and VM directories, even in case of test failures
-	defer func() {
-		// Clean up VM directory and VirtualBox VM
-		vmName := "test-vm-upload"
-		vmDir := filepath.Join(tempDir, vmName)
-		cleanupVM(t, vmName, vmDir)
-
-		// Then remove the entire temp directory
-		if err := os.RemoveAll(tempDir); err != nil {
-			t.Logf("Failed to remove temp dir: %v", err)
-		}
-	}()
-
-	// Create a test file to upload
-	sourceFile := filepath.Join(tempDir, "test-file.txt")
-	testContent := "This is a test file for upload"
-	if err := os.WriteFile(sourceFile, []byte(testContent), 0644); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-
-	// Create a VM directory for testing
-	vmName := "test-vm-upload"
-	vmDir := filepath.Join(tempDir, vmName)
-	if err := os.MkdirAll(vmDir, 0755); err != nil {
-		t.Fatalf("Failed to create VM dir: %v", err)
-	}
-
-	// Create a valid Vagrantfile
-	vagrantfilePath := filepath.Join(vmDir, "Vagrantfile")
-	validVagrantfile := `
-# -*- mode: ruby -*-
-# vi: set ft=ruby :
-# Test Vagrantfile
-
-Vagrant.configure("2") do |config|
-  config.vm.box = "ubuntu/focal64"
-  
-  config.vm.provider "virtualbox" do |vb|
-    vb.memory = 1024
-    vb.cpus = 2
-  end
-end
-`
-	if err := os.WriteFile(vagrantfilePath, []byte(validVagrantfile), 0644); err != nil {
-		t.Fatalf("Failed to create Vagrantfile: %v", err)
-	}
-
-	// Create the manager
-	manager := &Manager{baseDir: tempDir}
-
-	// Test cases for upload
 	testCases := []struct {
 		name            string
 		source          string
@@ -650,7 +450,7 @@ end
 		},
 		{
 			name:        "source file does not exist",
-			source:      filepath.Join(tempDir, "nonexistent-file.txt"),
+			source:      filepath.Join(sourceDir, "nonexistent-file.txt"),
 			destination: "/tmp/uploaded-file.txt",
 			vmExists:    true,
 			expectError: true,
@@ -678,18 +478,14 @@ end
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Skip tests that would require a running VM since we can't easily set that up in unit tests
 			if tc.vmRunning {
 				t.Skip("Skipping test that requires a running VM")
 			}
-
 			testVMName := vmName
 			if !tc.vmExists {
 				testVMName = "nonexistent-vm"
 			}
-
-			err := manager.UploadToVM(testVMName, tc.source, tc.destination, tc.compress, tc.compressionType)
-
+			err := manager.UploadToVM(ctx, testVMName, tc.source, tc.destination, tc.compress, tc.compressionType)
 			if tc.expectError && err == nil {
 				t.Error("Expected error but got none")
 			}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/rs/zerolog/log"
+	"github.com/vagrant-mcp/server/internal/errors"
 )
 
 // SyncDirection represents the direction of synchronization
@@ -98,16 +99,38 @@ type Engine struct {
 	watcherStopCh map[string]chan struct{}
 	mu            sync.RWMutex
 	running       bool
+	vmManager     VMManager             // Reference to the VM Manager for Vagrant commands
+	dispatcher    *SyncMethodDispatcher // Method dispatcher
+}
+
+// VMManager interface defines the methods required from a VM Manager
+type VMManager interface {
+	GetBaseDir() string
+	SyncToVM(name, source, target string) error
+	SyncFromVM(name, source, target string) error
 }
 
 // NewEngine creates a new synchronization engine
 func NewEngine() (*Engine, error) {
-	return &Engine{
+	engine := &Engine{
 		configs:       make(map[string]SyncConfig),
 		statuses:      make(map[string]SyncStatus),
 		watchers:      make(map[string]*fsnotify.Watcher),
 		watcherStopCh: make(map[string]chan struct{}),
-	}, nil
+	}
+
+	// Initialize the dispatcher
+	engine.dispatcher = NewSyncMethodDispatcher(engine)
+
+	return engine, nil
+}
+
+// SetVMManager sets the VM manager for the sync engine
+// This must be called before any sync operations
+func (e *Engine) SetVMManager(vmManager VMManager) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.vmManager = vmManager
 }
 
 // RegisterVM registers a VM with the sync engine
@@ -224,25 +247,16 @@ func (e *Engine) SyncToVM(vmName string, sourcePath string) (*SyncResult, error)
 		errMsg := fmt.Sprintf("Source path does not exist: %s", sourcePath)
 		status.Error = errMsg
 		e.statuses[vmName] = status
-		return nil, fmt.Errorf("%s", errMsg)
+		return nil, errors.OperationFailed("sync operation", fmt.Errorf("%s", errMsg))
 	}
 
 	// Start timer
 	startTime := time.Now()
 
 	// Perform sync based on method
-	var err error
-	var syncedFiles []string
-
-	switch config.Method {
-	case SyncMethodRsync:
-		syncedFiles, err = e.syncWithRsync(vmName, sourcePath, true)
-	case SyncMethodNFS:
-		syncedFiles, err = e.syncWithNFS(vmName, sourcePath, true)
-	case SyncMethodSMB:
-		syncedFiles, err = e.syncWithSMB(vmName, sourcePath, true)
-	default:
-		err = fmt.Errorf("unsupported sync method: %s", config.Method)
+	syncedFiles, err := e.dispatcher.DispatchSyncMethod(config.Method, vmName, sourcePath, true)
+	if err != nil {
+		return nil, errors.OperationFailed("sync to VM", err)
 	}
 
 	// Calculate sync time
@@ -256,12 +270,6 @@ func (e *Engine) SyncToVM(vmName string, sourcePath string) (*SyncResult, error)
 	status.LastSyncToVM = time.Now()
 	status.TotalSyncs++
 	status.TotalSyncTimeMs += syncTimeMs
-
-	if err != nil {
-		status.Error = err.Error()
-		e.statuses[vmName] = status
-		return nil, err
-	}
 
 	status.SynchronizedFiles = len(syncedFiles)
 	status.TotalFilesSynced += len(syncedFiles)
@@ -308,15 +316,10 @@ func (e *Engine) SyncFromVM(vmName string, sourcePath string) (*SyncResult, erro
 	var err error
 	var syncedFiles []string
 
-	switch config.Method {
-	case SyncMethodRsync:
-		syncedFiles, err = e.syncWithRsync(vmName, sourcePath, false)
-	case SyncMethodNFS:
-		syncedFiles, err = e.syncWithNFS(vmName, sourcePath, false)
-	case SyncMethodSMB:
-		syncedFiles, err = e.syncWithSMB(vmName, sourcePath, false)
-	default:
-		err = fmt.Errorf("unsupported sync method: %s", config.Method)
+	// Perform sync based on method using dispatcher
+	syncedFiles, err = e.dispatcher.DispatchSyncMethod(config.Method, vmName, sourcePath, false)
+	if err != nil {
+		return nil, errors.OperationFailed("sync from VM", err)
 	}
 
 	// Calculate sync time
@@ -330,12 +333,6 @@ func (e *Engine) SyncFromVM(vmName string, sourcePath string) (*SyncResult, erro
 	status.LastSyncFromVM = time.Now()
 	status.TotalSyncs++
 	status.TotalSyncTimeMs += syncTimeMs
-
-	if err != nil {
-		status.Error = err.Error()
-		e.statuses[vmName] = status
-		return nil, err
-	}
 
 	status.SynchronizedFiles = len(syncedFiles)
 	status.TotalFilesSynced += len(syncedFiles)
@@ -470,7 +467,7 @@ func (e *Engine) ResolveSyncConflict(vmName string, path string, resolution stri
 	}
 
 	if foundIndex == -1 {
-		return fmt.Errorf("conflict not found for path: %s", path)
+		return errors.NotFound("conflict", path)
 	}
 
 	conflict := status.Conflicts[foundIndex]
@@ -480,25 +477,25 @@ func (e *Engine) ResolveSyncConflict(vmName string, path string, resolution stri
 	case "use_host":
 		// Sync file from host to VM
 		if _, err := e.syncFilesToVM(vmName, []string{path}); err != nil {
-			return fmt.Errorf("failed to sync file to VM: %w", err)
+			return errors.OperationFailed("sync file to VM", err)
 		}
 	case "use_vm":
 		// Sync file from VM to host
 		if _, err := e.syncFilesFromVM(vmName, []string{path}); err != nil {
-			return fmt.Errorf("failed to sync file from VM: %w", err)
+			return errors.OperationFailed("sync file from VM", err)
 		}
 	case "merge":
 		// Attempt to merge changes
 		if err := e.mergeConflict(vmName, conflict); err != nil {
-			return fmt.Errorf("failed to merge conflict: %w", err)
+			return errors.OperationFailed("merge conflict", err)
 		}
 	case "keep_both":
 		// Keep both versions with different names
 		if err := e.keepBothVersions(vmName, conflict); err != nil {
-			return fmt.Errorf("failed to keep both versions: %w", err)
+			return errors.OperationFailed("keep both versions", err)
 		}
 	default:
-		return fmt.Errorf("invalid resolution: %s (must be 'use_host', 'use_vm', 'merge', or 'keep_both')", resolution)
+		return errors.InvalidInput(fmt.Sprintf("invalid resolution: %s (must be 'use_host', 'use_vm', 'merge', or 'keep_both')", resolution))
 	}
 
 	// Remove conflict from list
@@ -528,7 +525,7 @@ func (e *Engine) SemanticSearch(vmName string, query string, maxResults int) ([]
 	// Define search paths
 	searchPath := config.ProjectPath
 	if searchPath == "" {
-		return nil, fmt.Errorf("no project path defined for VM %s", vmName)
+		return nil, errors.NotFound("project path for VM", vmName)
 	}
 
 	log.Info().Str("vm", vmName).Str("query", query).Msg("Executing semantic search")
@@ -538,7 +535,7 @@ func (e *Engine) SemanticSearch(vmName string, query string, maxResults int) ([]
 	cmd := exec.Command("grep", "-r", "-l", "-i", query, searchPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil && !strings.Contains(err.Error(), "exit status 1") {
-		return nil, fmt.Errorf("search failed: %w", err)
+		return nil, errors.OperationFailed("search", err)
 	}
 
 	// Process results
@@ -615,7 +612,7 @@ func (e *Engine) ExactSearch(vmName string, query string, caseSensitive bool, ma
 	// Define search paths
 	searchPath := config.ProjectPath
 	if searchPath == "" {
-		return nil, fmt.Errorf("no project path defined for VM %s", vmName)
+		return nil, errors.NotFound("project path for VM", vmName)
 	}
 
 	log.Info().Str("vm", vmName).Str("query", query).Msg("Executing exact search")
@@ -631,7 +628,7 @@ func (e *Engine) ExactSearch(vmName string, query string, caseSensitive bool, ma
 	cmd := exec.Command("grep", grepArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil && !strings.Contains(err.Error(), "exit status 1") {
-		return nil, fmt.Errorf("search failed: %w", err)
+		return nil, errors.OperationFailed("search", err)
 	}
 
 	// Process results
@@ -689,7 +686,7 @@ func (e *Engine) FuzzySearch(vmName string, query string, maxResults int) ([]Sea
 	// Define search paths
 	searchPath := config.ProjectPath
 	if searchPath == "" {
-		return nil, fmt.Errorf("no project path defined for VM %s", vmName)
+		return nil, errors.NotFound("project path for VM", vmName)
 	}
 
 	log.Info().Str("vm", vmName).Str("query", query).Msg("Executing fuzzy search")
@@ -763,53 +760,171 @@ func (e *Engine) FuzzySearch(vmName string, query string, maxResults int) ([]Sea
 // syncWithRsync synchronizes files using rsync
 func (e *Engine) syncWithRsync(vmName string, sourcePath string, toVM bool) ([]string, error) {
 	// Get VM config
-	config := e.configs[vmName]
-
-	// Get exclude patterns
-	var excludeArgs []string
-	for _, pattern := range config.ExcludePatterns {
-		// Store the result of append back to excludeArgs
-		// to ensure we're actually using the result of append
-		excludeArgs = append(excludeArgs, "--exclude", pattern)
-		_ = excludeArgs // Force usage of the result to silence the linter
+	config, exists := e.configs[vmName]
+	if !exists {
+		return nil, ErrVMNotRegistered
 	}
 
-	// Build rsync command
-	// Note: In a real implementation, we would use Vagrant's built-in rsync command
-	// or execute SSH commands to rsync files, but this is a simplified version
+	// Get exclude patterns - these are used by the VM manager internally
+	// Just logging them for reference
+	if len(config.ExcludePatterns) > 0 {
+		log.Debug().Str("vm", vmName).Strs("exclude_patterns", config.ExcludePatterns).Msg("Using exclude patterns for sync")
+	}
+
+	// We'll use the VM manager directly instead of creating temporary files and running commands
+
+	// Check if VM manager is set
+	if e.vmManager == nil {
+		return nil, errors.OperationFailed("VM manager not set before sync operations", nil)
+	}
+
+	// Use the VM manager to perform the sync
+	var syncErr error
 	if toVM {
-		// Sync from host to VM (simplified mock implementation)
-		return []string{"file1.txt", "file2.txt"}, nil
+		// Sync from host to VM using the VM manager
+		syncErr = e.vmManager.SyncToVM(vmName, sourcePath, "/vagrant")
 	} else {
-		// Sync from VM to host (simplified mock implementation)
-		return []string{"file3.txt", "file4.txt"}, nil
+		// Sync from VM to host using the VM manager
+		syncErr = e.vmManager.SyncFromVM(vmName, "/vagrant", sourcePath)
 	}
+
+	if syncErr != nil {
+		return nil, errors.OperationFailed("sync operation", syncErr)
+	}
+
+	// Since we're using the VM manager, we don't have a direct way to determine which files were synced
+	// In a real-world scenario, we could compare file timestamps before and after sync
+
+	// For now, we'll return a placeholder to indicate successful sync
+	syncedFiles := []string{
+		fmt.Sprintf("sync_completed_%s_%s", vmName, time.Now().Format(time.RFC3339)),
+	}
+
+	return syncedFiles, nil
 }
 
 // syncWithNFS synchronizes files using NFS
 func (e *Engine) syncWithNFS(vmName string, sourcePath string, toVM bool) ([]string, error) {
 	// NFS is typically set up as a mount, so individual sync operations are not needed
-	// This would normally involve checking mount status and refreshing if necessary
-	return []string{}, nil
+	// Check if VM manager is set
+	if e.vmManager == nil {
+		return nil, errors.OperationFailed("VM manager not set before sync operations", nil)
+	}
+
+	// For NFS, we need to ensure the VM is running for the mount to be accessible
+	// Use the VM manager to perform the sync
+	var syncErr error
+	if toVM {
+		// Sync from host to VM using the VM manager
+		syncErr = e.vmManager.SyncToVM(vmName, sourcePath, "/vagrant")
+	} else {
+		// Sync from VM to host using the VM manager
+		syncErr = e.vmManager.SyncFromVM(vmName, "/vagrant", sourcePath)
+	}
+
+	if syncErr != nil {
+		return nil, errors.OperationFailed("sync operation", syncErr)
+	}
+
+	// Return a placeholder to indicate successful sync
+	return []string{
+		fmt.Sprintf("sync_completed_%s_%s", vmName, time.Now().Format(time.RFC3339)),
+	}, nil
 }
 
 // syncWithSMB synchronizes files using SMB
 func (e *Engine) syncWithSMB(vmName string, sourcePath string, toVM bool) ([]string, error) {
 	// SMB is typically set up as a mount, so individual sync operations are not needed
-	// This would normally involve checking mount status and refreshing if necessary
-	return []string{}, nil
+	// Check if VM manager is set
+	if e.vmManager == nil {
+		return nil, errors.OperationFailed("VM manager not set before sync operations", nil)
+	}
+
+	// For SMB, we need to ensure the VM is running for the mount to be accessible
+	// Use the VM manager to perform the sync
+	var syncErr error
+	if toVM {
+		// Sync from host to VM using the VM manager
+		syncErr = e.vmManager.SyncToVM(vmName, sourcePath, "/vagrant")
+	} else {
+		// Sync from VM to host using the VM manager
+		syncErr = e.vmManager.SyncFromVM(vmName, "/vagrant", sourcePath)
+	}
+
+	if syncErr != nil {
+		return nil, errors.OperationFailed("sync operation", syncErr)
+	}
+
+	// Return a placeholder to indicate successful sync
+	return []string{
+		fmt.Sprintf("sync_completed_%s_%s", vmName, time.Now().Format(time.RFC3339)),
+	}, nil
 }
 
 // syncFilesToVM synchronizes specific files to the VM
 func (e *Engine) syncFilesToVM(vmName string, files []string) ([]string, error) {
-	// Simplified implementation
-	return files, nil
+	// Check if VM manager is set
+	if e.vmManager == nil {
+		return nil, errors.OperationFailed("VM manager not set before sync operations", nil)
+	}
+
+	// Get VM config
+	config, exists := e.configs[vmName]
+	if !exists {
+		return nil, ErrVMNotRegistered
+	}
+
+	// For selective file sync, we need to iterate through each file and sync individually
+	syncedFiles := []string{}
+	for _, file := range files {
+		// Get the relative path within the project
+		relPath, err := filepath.Rel(config.ProjectPath, file)
+		if err != nil {
+			continue // Skip files outside the project
+		}
+
+		// Use the VM manager to sync this specific file
+		guestPath := filepath.Join("/vagrant", relPath)
+		if err := e.vmManager.SyncToVM(vmName, file, guestPath); err != nil {
+			return syncedFiles, errors.OperationFailed("failed to sync file to VM", err)
+		}
+
+		syncedFiles = append(syncedFiles, file)
+	}
+
+	return syncedFiles, nil
 }
 
 // syncFilesFromVM synchronizes specific files from the VM
 func (e *Engine) syncFilesFromVM(vmName string, files []string) ([]string, error) {
-	// Simplified implementation
-	return files, nil
+	// Check if VM manager is set
+	if e.vmManager == nil {
+		return nil, errors.OperationFailed("VM manager not set before sync operations", nil)
+	}
+
+	// Get VM config
+	config, exists := e.configs[vmName]
+	if !exists {
+		return nil, ErrVMNotRegistered
+	}
+
+	// For selective file sync, we need to iterate through each file and sync individually
+	syncedFiles := []string{}
+	for _, file := range files {
+		// Determine the paths for source and destination
+		// Convert the path to be relative to /vagrant on the VM
+		vmPath := filepath.Join("/vagrant", filepath.Base(file))
+		hostPath := filepath.Join(config.ProjectPath, filepath.Base(file))
+
+		// Use the VM manager to sync this specific file
+		if err := e.vmManager.SyncFromVM(vmName, vmPath, hostPath); err != nil {
+			return syncedFiles, errors.OperationFailed("failed to sync file from VM", err)
+		}
+
+		syncedFiles = append(syncedFiles, hostPath)
+	}
+
+	return syncedFiles, nil
 }
 
 // startWatcher starts a file watcher for a VM

@@ -15,8 +15,9 @@ import (
 
 func TestServer(t *testing.T) {
 	// Skip integration tests unless explicitly enabled
-	if os.Getenv("INTEGRATION_TESTS") != "1" {
-		t.Skip("Integration tests disabled. Set INTEGRATION_TESTS=1 to run.")
+	testLevel := os.Getenv("TEST_LEVEL")
+	if testLevel != "integration" && testLevel != "vm-start" {
+		t.Skip("Integration tests disabled. Set TEST_LEVEL=integration to run.")
 	}
 
 	// Initialize VM manager, sync engine, and executor
@@ -31,6 +32,8 @@ func TestServer(t *testing.T) {
 	}
 
 	adapterVM := &exec.VMManagerAdapter{Real: vmManager}
+	// Set the VM manager on the sync engine before creating the adapter
+	syncEngine.SetVMManager(adapterVM)
 	adapterSync := &exec.SyncEngineAdapter{Real: syncEngine}
 
 	executor, err := exec.NewExecutor(adapterVM, adapterSync)
@@ -49,7 +52,7 @@ func TestServer(t *testing.T) {
 	handlers.RegisterVMTools(srv, adapterVM, adapterSync)
 	handlers.RegisterExecTools(srv, adapterVM, adapterSync, executor)
 	handlers.RegisterEnvTools(srv, adapterVM, executor)
-	handlers.RegisterSyncTools(srv, adapterVM, adapterSync)
+	handlers.RegisterSyncTools(srv, adapterSync, adapterVM)
 
 	// Register resources using the MCP-go implementation
 	resources.RegisterMCPResources(srv, adapterVM, executor)

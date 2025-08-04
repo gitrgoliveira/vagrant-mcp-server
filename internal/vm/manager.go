@@ -1,14 +1,17 @@
 package vm
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/rs/zerolog/log"
+	"github.com/vagrant-mcp/server/internal/cmdexec"
+	"github.com/vagrant-mcp/server/internal/core"
+	"github.com/vagrant-mcp/server/internal/errors"
 	"github.com/vagrant-mcp/server/internal/utils"
 )
 
@@ -47,164 +50,118 @@ func NewManager() (*Manager, error) {
 }
 
 // CreateVM creates a new Vagrant VM with the given configuration
-func (m *Manager) CreateVM(name string, projectPath string, config VMConfig) error {
-	// Create VM directory
+func (m *Manager) CreateVM(ctx context.Context, name string, projectPath string, config core.VMConfig) error {
 	vmDir := m.getVMDir(name)
 	if err := os.MkdirAll(vmDir, 0755); err != nil {
-		return fmt.Errorf("failed to create VM directory: %w", err)
+		return errors.OperationFailed("create VM directory", err)
 	}
-
-	// Save VM configuration
 	config.Name = name
 	config.ProjectPath = projectPath
 	if err := m.saveVMConfig(name, config); err != nil {
-		return fmt.Errorf("failed to save VM configuration: %w", err)
+		return errors.OperationFailed("save VM configuration", err)
 	}
-
-	// Generate Vagrantfile
 	if err := m.generateVagrantfile(name, config); err != nil {
-		return fmt.Errorf("failed to generate Vagrantfile: %w", err)
+		return errors.OperationFailed("generate Vagrantfile", err)
 	}
-
 	log.Info().Str("name", name).Msg("VM created successfully")
 	return nil
 }
 
 // StartVM starts the specified VM
-func (m *Manager) StartVM(name string) error {
+func (m *Manager) StartVM(ctx context.Context, name string) error {
 	vmDir := m.getVMDir(name)
-
-	// Run vagrant up
-	cmd := exec.Command("vagrant", "up")
+	cmd := exec.CommandContext(ctx, "vagrant", "up")
 	cmd.Dir = vmDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to start VM: %w, output: %s", err, output)
+		return errors.Wrap(err, errors.CodeOperationFailed, fmt.Sprintf("failed to start VM: %s", output))
 	}
-
 	log.Info().Str("name", name).Msg("VM started successfully")
 	return nil
 }
 
 // StopVM stops the specified VM
-func (m *Manager) StopVM(name string) error {
+func (m *Manager) StopVM(ctx context.Context, name string) error {
 	vmDir := m.getVMDir(name)
-
-	// Run vagrant halt
-	cmd := exec.Command("vagrant", "halt")
+	cmd := exec.CommandContext(ctx, "vagrant", "halt")
 	cmd.Dir = vmDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to stop VM: %w, output: %s", err, output)
+		return errors.Wrap(err, errors.CodeOperationFailed, fmt.Sprintf("failed to stop VM: %s", output))
 	}
-
 	log.Info().Str("name", name).Msg("VM stopped successfully")
 	return nil
 }
 
 // DestroyVM destroys the specified VM and cleans up resources
-func (m *Manager) DestroyVM(name string) error {
+func (m *Manager) DestroyVM(ctx context.Context, name string) error {
 	vmDir := m.getVMDir(name)
-
-	// Run vagrant destroy
-	cmd := exec.Command("vagrant", "destroy")
+	cmd := exec.CommandContext(ctx, "vagrant", "destroy", "-f")
 	cmd.Dir = vmDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Error().Str("name", name).Err(err).Str("output", string(output)).Msg("Failed to destroy VM")
 		// Continue with cleanup even if destroy fails
 	}
-
-	// Remove VM directory
 	if err := os.RemoveAll(vmDir); err != nil {
-		return fmt.Errorf("failed to clean up VM directory: %w", err)
+		return errors.OperationFailed("clean up VM directory", err)
 	}
-
-	// Remove VM config file
 	configFile := filepath.Join(filepath.Dir(m.baseDir), fmt.Sprintf("%s.json", name))
 	if err := os.Remove(configFile); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to clean up VM config: %w", err)
+		return errors.OperationFailed("clean up VM config", err)
 	}
-
 	log.Info().Str("name", name).Msg("VM destroyed successfully")
 	return nil
 }
 
-// GetVMState retrieves the current state of the VM
-func (m *Manager) GetVMState(name string) (State, error) {
+// GetVMState returns the current state of the VM as core.VMState
+func (m *Manager) GetVMState(ctx context.Context, name string) (core.VMState, error) {
 	vmDir := m.getVMDir(name)
-
-	// Check if VM directory exists
 	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
-		return NotCreated, nil
+		return core.NotCreated, nil
 	}
-
-	// Run vagrant status
-	cmd := exec.Command("vagrant", "status", "--machine-readable")
+	cmd := exec.CommandContext(ctx, "vagrant", "status", "--machine-readable")
 	cmd.Dir = vmDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return Error, fmt.Errorf("failed to get VM status: %w", err)
+		return core.Unknown, errors.OperationFailed("get VM status", err)
 	}
-
-	// Parse status output
-	return m.parseVagrantStatus(string(output))
+	state, err := m.parseVagrantStatus(string(output))
+	if err != nil {
+		return core.Unknown, errors.OperationFailed("parse vagrant status", err)
+	}
+	return state, nil
 }
 
-// GetVMConfig retrieves the VM configuration
-func (m *Manager) GetVMConfig(name string) (VMConfig, error) {
+// GetVMConfig returns the VM configuration as core.VMConfig
+func (m *Manager) GetVMConfig(ctx context.Context, name string) (core.VMConfig, error) {
 	configFile := filepath.Join(filepath.Dir(m.baseDir), fmt.Sprintf("%s.json", name))
-
 	data, err := os.ReadFile(configFile)
 	if err != nil {
-		return VMConfig{}, fmt.Errorf("failed to read VM config: %w", err)
+		return core.VMConfig{}, errors.OperationFailed("read VM config", err)
 	}
-
-	var config VMConfig
+	var config core.VMConfig
 	if err := json.Unmarshal(data, &config); err != nil {
-		return VMConfig{}, fmt.Errorf("failed to parse VM config: %w", err)
+		return core.VMConfig{}, errors.OperationFailed("parse VM config", err)
 	}
-
 	return config, nil
 }
 
-// GetSSHConfig retrieves the SSH configuration for the VM
-func (m *Manager) GetSSHConfig(name string) (map[string]string, error) {
-	vmDir := m.getVMDir(name)
-
-	// Run vagrant ssh-config
-	cmd := exec.Command("vagrant", "ssh-config")
-	cmd.Dir = vmDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get SSH config: %w", err)
-	}
-
-	// Parse SSH config
-	return m.parseSSHConfig(string(output))
-}
-
-// UpdateVMConfig updates the configuration for a VM
-func (m *Manager) UpdateVMConfig(name string, config VMConfig) error {
+// UpdateVMConfig updates the VM configuration using core.VMConfig
+func (m *Manager) UpdateVMConfig(ctx context.Context, name string, config core.VMConfig) error {
 	log.Debug().Str("vm", name).Msg("Updating VM configuration")
-
-	// Ensure VM directory exists
 	vmDir := filepath.Join(m.baseDir, name)
 	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
-		return fmt.Errorf("VM directory does not exist: %s", vmDir)
+		return errors.NotFound("VM directory", vmDir)
 	}
-
-	// Update config file
 	configPath := filepath.Join(vmDir, "config.json")
 	configData, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal VM config: %w", err)
+		return errors.OperationFailed("marshal VM config", err)
 	}
-
 	if err := os.WriteFile(configPath, configData, 0644); err != nil {
-		return fmt.Errorf("failed to write VM config: %w", err)
+		return errors.OperationFailed("write VM config", err)
 	}
-
 	log.Info().Str("vm", name).Msg("VM configuration updated")
 	return nil
 }
@@ -220,25 +177,23 @@ func (m *Manager) getVMDir(name string) string {
 }
 
 // saveVMConfig saves the VM configuration to a file
-func (m *Manager) saveVMConfig(name string, config VMConfig) error {
+func (m *Manager) saveVMConfig(name string, config core.VMConfig) error {
 	configDir := filepath.Dir(m.baseDir)
 	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
+		return errors.OperationFailed("create config directory", err)
 	}
 
 	configFile := filepath.Join(configDir, fmt.Sprintf("%s.json", name))
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal VM config: %w", err)
+		return errors.OperationFailed("marshal VM config", err)
 	}
 
 	return os.WriteFile(configFile, data, 0644)
 }
 
 // generateVagrantfile creates a Vagrantfile for the VM and validates it
-// TODO: Consider using the Go embed package with external template files for better maintainability
-// The template was previously stored in templates/Vagrantfile.template but is now inlined here
-func (m *Manager) generateVagrantfile(name string, config VMConfig) error {
+func (m *Manager) generateVagrantfile(name string, config core.VMConfig) error {
 	vagrantfile := `# -*- mode: ruby -*-
 # vi: set ft=ruby :
 # Generated by Vagrant MCP Server
@@ -325,7 +280,7 @@ end`
 	vmDir := m.getVMDir(name)
 	vagrantfilePath := filepath.Join(vmDir, "Vagrantfile")
 	if err := os.WriteFile(vagrantfilePath, []byte(content), 0644); err != nil {
-		return err
+		return errors.OperationFailed("write Vagrantfile", err)
 	}
 
 	// Always validate the Vagrantfile to ensure it's correct
@@ -333,7 +288,7 @@ end`
 	cmd.Dir = vmDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("vagrantfile validation failed: %w, output: %s", err, output)
+		return errors.Wrap(err, errors.CodeOperationFailed, fmt.Sprintf("vagrantfile validation failed: %s", output))
 	}
 	log.Info().Str("name", name).Msg("Vagrantfile validated successfully")
 
@@ -341,102 +296,116 @@ end`
 }
 
 // parseVagrantStatus parses the output of 'vagrant status --machine-readable'
-func (m *Manager) parseVagrantStatus(output string) (State, error) {
-	lines := strings.Split(output, "\n")
+func (m *Manager) parseVagrantStatus(output string) (core.VMState, error) {
+	return GlobalStateMapper.ParseVagrantState(output)
+}
 
-	for _, line := range lines {
-		parts := strings.Split(line, ",")
-		if len(parts) >= 4 && parts[2] == "state" {
-			switch parts[3] {
-			case "running":
-				return Running, nil
-			case "poweroff", "aborted":
-				return Stopped, nil
-			case "saved":
-				return Suspended, nil
-			case "not_created":
-				return NotCreated, nil
-			}
-		}
-	}
-
-	return Error, fmt.Errorf("could not determine VM state")
+// ParseVagrantStatus parses the output of 'vagrant status --machine-readable'
+func (m *Manager) ParseVagrantStatus(output string) (core.VMState, error) {
+	return m.parseVagrantStatus(output)
 }
 
 // parseSSHConfig parses the output of 'vagrant ssh-config'
 func (m *Manager) parseSSHConfig(output string) (map[string]string, error) {
-	config := make(map[string]string)
-	lines := strings.Split(output, "\n")
+	return utils.GlobalOutputParser.ParseSSHConfig(output)
+}
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		parts := strings.SplitN(line, " ", 2)
-		if len(parts) == 2 {
-			key := parts[0]
-			value := strings.TrimSpace(parts[1])
-			config[key] = value
-		}
+// ExecuteCommand executes a command in a VM
+func (m *Manager) ExecuteCommand(ctx context.Context, name string, cmd string, args []string, workingDir string) (string, string, int, error) {
+	vmDir := m.getVMDir(name)
+	options := cmdexec.CmdOptions{
+		Directory:  vmDir,
+		OutputMode: cmdexec.OutputModeCapture,
 	}
-
-	return config, nil
+	// If a workingDir is provided, use it as a subdirectory inside the VM directory
+	if workingDir != "" {
+		options.Directory = filepath.Join(vmDir, workingDir)
+	}
+	result, err := cmdexec.Execute(ctx, cmd, args, options)
+	if err != nil {
+		return string(result.StdOut), string(result.StdErr), result.ExitCode, errors.OperationFailed("execute command in VM", err)
+	}
+	return string(result.StdOut), string(result.StdErr), result.ExitCode, nil
 }
 
 // UploadToVM uploads a file or directory to the VM using vagrant upload
-func (m *Manager) UploadToVM(name string, source string, destination string, compress bool, compressionType string) error {
-	// Validate VM exists
+func (m *Manager) UploadToVM(ctx context.Context, name string, source string, destination string, compress bool, compressionType string) error {
 	vmDir := m.getVMDir(name)
 	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
-		return fmt.Errorf("VM '%s' does not exist", name)
+		return errors.NotFound("VM", name)
 	}
-
-	// Get VM state
-	state, err := m.GetVMState(name)
+	state, err := m.GetVMState(ctx, name)
 	if err != nil {
-		return fmt.Errorf("failed to get VM state: %w", err)
+		return errors.OperationFailed("get VM state", err)
 	}
-
-	// Check if VM is running
-	if state != Running {
-		return fmt.Errorf("VM is not running (current state: %s)", state)
+	if state != core.Running {
+		return errors.Wrap(fmt.Errorf("VM is not running (current state: %s)", state), errors.CodeInvalidState, "VM is not running")
 	}
-
-	// Validate source exists
 	if _, err := os.Stat(source); os.IsNotExist(err) {
-		return fmt.Errorf("source path does not exist: %s", source)
+		return errors.NotFound("source path", source)
 	}
-
-	// Prepare vagrant upload command
 	args := []string{"upload"}
-
 	if compress {
 		args = append(args, "--compress")
 		if compressionType != "" {
 			args = append(args, "--compression-type", compressionType)
 		}
 	}
-
-	// Add source and destination args
 	args = append(args, source, destination)
-
-	// Execute the command
-	cmd := exec.Command("vagrant", args...)
+	cmd := exec.CommandContext(ctx, "vagrant", args...)
 	cmd.Dir = vmDir
-
 	log.Debug().Str("vm", name).Str("source", source).Str("destination", destination).
 		Bool("compress", compress).Str("compression", compressionType).
 		Msg("Uploading file to VM")
-
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("upload failed: %w: %s", err, output)
+		return errors.OperationFailed("upload file to VM", fmt.Errorf("%w: %s", err, output))
 	}
-
 	log.Info().Str("vm", name).Str("source", source).Str("destination", destination).
 		Msg("File uploaded to VM successfully")
-
 	return nil
+}
+
+// SyncToVM synchronizes files from host to VM using rsync
+func (m *Manager) SyncToVM(name, source, target string) error {
+	// Use rsync to copy files from host to VM
+	// This is a simplified implementation; in production, handle SSH config, errors, etc.
+	vmDir := m.getVMDir(name)
+	if vmDir == "" {
+		return fmt.Errorf("could not determine VM directory for %s", name)
+	}
+	// Assume target is relative to /vagrant in the VM
+	cmd := exec.Command("rsync", "-az", "--delete", source+"/", vmDir+"/vagrant/"+target+"/")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("rsync to VM failed: %v, output: %s", err, string(output))
+	}
+	return nil
+}
+
+// SyncFromVM synchronizes files from VM to host using rsync
+func (m *Manager) SyncFromVM(name, source, target string) error {
+	// Use rsync to copy files from VM to host
+	vmDir := m.getVMDir(name)
+	if vmDir == "" {
+		return fmt.Errorf("could not determine VM directory for %s", name)
+	}
+	cmd := exec.Command("rsync", "-az", "--delete", vmDir+"/vagrant/"+source+"/", target+"/")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("rsync from VM failed: %v, output: %s", err, string(output))
+	}
+	return nil
+}
+
+// GetSSHConfig retrieves the SSH configuration for the VM using 'vagrant ssh-config'
+func (m *Manager) GetSSHConfig(ctx context.Context, name string) (map[string]string, error) {
+	vmDir := m.getVMDir(name)
+	cmd := exec.CommandContext(ctx, "vagrant", "ssh-config")
+	cmd.Dir = vmDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get SSH config: %w, output: %s", err, string(output))
+	}
+	return m.parseSSHConfig(string(output))
 }

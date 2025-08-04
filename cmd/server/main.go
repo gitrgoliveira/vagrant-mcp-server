@@ -1,6 +1,8 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"os"
 
 	"github.com/mark3labs/mcp-go/server"
@@ -14,10 +16,49 @@ import (
 	"github.com/vagrant-mcp/server/internal/vm"
 )
 
+// Build-time variables injected via ldflags
+var (
+	Version   = "dev"
+	GitCommit = "unknown"
+	BuildTime = "unknown"
+	GoVersion = "unknown"
+)
+
+const (
+	Author  = "Vagrant MCP Server Team"
+	Contact = "support@vagrant-mcp-server.dev"
+)
+
 func main() {
+	// Handle version flag
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
+	flag.BoolVar(&showVersion, "v", false, "Show version information (shorthand)")
+	flag.Parse()
+
+	if showVersion {
+		fmt.Printf("Vagrant MCP Server %s\n", Version)
+		fmt.Printf("Git Commit: %s\n", GitCommit)
+		fmt.Printf("Build Time: %s\n", BuildTime)
+		fmt.Printf("Go Version: %s\n", GoVersion)
+		fmt.Printf("Author: %s\n", Author)
+		fmt.Printf("Contact: %s\n", Contact)
+		fmt.Printf("Repository: https://github.com/vagrant-mcp/server\n")
+		return
+	}
+
 	// Configure logging
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout})
+
+	// Check if we're in MCP mode (via stdio) and disable color output if so
+	transportType := os.Getenv("MCP_TRANSPORT")
+	if transportType == "" && os.Getenv("VSCODE_MCP") != "true" {
+		// Use colored console output for interactive use
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout})
+	} else {
+		// Use plain JSON output when running as an MCP server to avoid parsing issues
+		log.Logger = log.Output(os.Stdout)
+	}
 
 	// Set log level from environment or default to info
 	logLevel := os.Getenv("LOG_LEVEL")
@@ -31,7 +72,10 @@ func main() {
 	}
 	zerolog.SetGlobalLevel(level)
 
-	log.Info().Msg("Starting Vagrant MCP Server")
+	log.Info().
+		Str("version", Version).
+		Str("contact", Contact).
+		Msg("Starting Vagrant MCP Server")
 
 	// Check if Vagrant CLI is installed
 	if err := utils.CheckVagrantInstalled(); err != nil {
@@ -51,6 +95,8 @@ func main() {
 	}
 
 	adapterVM := &exec.VMManagerAdapter{Real: vmManager}
+	// Set the VM manager on the sync engine before creating the adapter
+	syncEngine.SetVMManager(adapterVM)
 	adapterSync := &exec.SyncEngineAdapter{Real: syncEngine}
 
 	executor, err := exec.NewExecutor(adapterVM, adapterSync)
@@ -61,21 +107,19 @@ func main() {
 	// Create a new MCP server with recovery middleware
 	srv := server.NewMCPServer(
 		"Vagrant Development VM MCP Server",
-		"1.0.0",
+		Version,
 		server.WithRecovery(),
 	)
 
-	// Register all tools using the MCP-go implementation
-	handlers.RegisterVMTools(srv, adapterVM, adapterSync)
-	handlers.RegisterExecTools(srv, adapterVM, adapterSync, executor)
-	handlers.RegisterEnvTools(srv, adapterVM, executor)
-	handlers.RegisterSyncTools(srv, adapterVM, adapterSync)
+	// Register all tools using the unified registry
+	handlerRegistry := handlers.NewHandlerRegistry(adapterVM, adapterSync, executor)
+	handlerRegistry.RegisterAllTools(srv)
 
 	// Register resources using the MCP-go implementation
 	resources.RegisterMCPResources(srv, adapterVM, executor)
 
 	// Determine which transport to use
-	transportType := os.Getenv("MCP_TRANSPORT")
+	transportType = os.Getenv("MCP_TRANSPORT")
 	if transportType == "" {
 		transportType = "stdio" // Default to stdio if not specified
 	}

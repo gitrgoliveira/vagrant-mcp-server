@@ -10,12 +10,12 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/rs/zerolog/log"
+	"github.com/vagrant-mcp/server/internal/core"
 	"github.com/vagrant-mcp/server/internal/exec"
-	"github.com/vagrant-mcp/server/internal/vm"
 )
 
 // RegisterMCPResources registers all resources with the MCP server
-func RegisterMCPResources(srv *server.MCPServer, vmManager exec.VMManager, executor *exec.Executor) {
+func RegisterMCPResources(srv *server.MCPServer, vmManager core.VMManager, executor *exec.Executor) {
 	// Register VM status resource
 	registerVMStatusResource(srv, vmManager)
 
@@ -38,7 +38,7 @@ func RegisterMCPResources(srv *server.MCPServer, vmManager exec.VMManager, execu
 }
 
 // registerVMStatusResource registers the VM status resource
-func registerVMStatusResource(srv *server.MCPServer, vmManager exec.VMManager) {
+func registerVMStatusResource(srv *server.MCPServer, vmManager core.VMManager) {
 	statusResource := mcp.NewResource(
 		"devvm://status",
 		"VM Status",
@@ -58,7 +58,7 @@ func registerVMStatusResource(srv *server.MCPServer, vmManager exec.VMManager) {
 
 		for _, vmDir := range vmDirs {
 			vmName := filepath.Base(vmDir)
-			state, err := vmManager.GetVMState(vmName)
+			state, err := vmManager.GetVMState(context.Background(), vmName)
 			if err != nil {
 				result[vmName] = map[string]interface{}{
 					"state": "error",
@@ -89,7 +89,7 @@ func registerVMStatusResource(srv *server.MCPServer, vmManager exec.VMManager) {
 }
 
 // registerVMConfigResource registers the VM config resource
-func registerVMConfigResource(srv *server.MCPServer, vmManager exec.VMManager) {
+func registerVMConfigResource(srv *server.MCPServer, vmManager core.VMManager) {
 	configResource := mcp.NewResource(
 		"devvm://config/{vmName}",
 		"VM Configuration",
@@ -112,7 +112,7 @@ func registerVMConfigResource(srv *server.MCPServer, vmManager exec.VMManager) {
 		}
 
 		// Get VM configuration
-		config, err := vmManager.GetVMConfig(vmName)
+		config, err := vmManager.GetVMConfig(context.Background(), vmName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get VM config: %w", err)
 		}
@@ -134,7 +134,7 @@ func registerVMConfigResource(srv *server.MCPServer, vmManager exec.VMManager) {
 }
 
 // registerVMFilesResource registers the VM files resource
-func registerVMFilesResource(srv *server.MCPServer, vmManager exec.VMManager, executor *exec.Executor) {
+func registerVMFilesResource(srv *server.MCPServer, vmManager core.VMManager, executor *exec.Executor) {
 	filesResource := mcp.NewResource(
 		"devvm://files/{path*}",
 		"VM Files",
@@ -159,12 +159,12 @@ func registerVMFilesResource(srv *server.MCPServer, vmManager exec.VMManager, ex
 		path := parts[1]
 
 		// Check VM state
-		state, err := vmManager.GetVMState(vmName)
+		state, err := vmManager.GetVMState(context.Background(), vmName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get VM state: %w", err)
 		}
 
-		if state != vm.Running {
+		if state != core.Running {
 			return nil, fmt.Errorf("VM is not running (current state: %s)", state)
 		}
 
@@ -216,7 +216,7 @@ func registerVMFilesResource(srv *server.MCPServer, vmManager exec.VMManager, ex
 }
 
 // registerVMLogsResource registers the VM logs resource
-func registerVMLogsResource(srv *server.MCPServer, vmManager exec.VMManager, executor *exec.Executor) {
+func registerVMLogsResource(srv *server.MCPServer, vmManager core.VMManager, executor *exec.Executor) {
 	logsResource := mcp.NewResource(
 		"devvm://logs/{logType}",
 		"VM Logs",
@@ -240,12 +240,12 @@ func registerVMLogsResource(srv *server.MCPServer, vmManager exec.VMManager, exe
 		}
 
 		// Check VM state
-		state, err := vmManager.GetVMState(vmName)
+		state, err := vmManager.GetVMState(context.Background(), vmName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get VM state: %w", err)
 		}
 
-		if state != vm.Running {
+		if state != core.Running {
 			return nil, fmt.Errorf("VM is not running (current state: %s)", state)
 		}
 
@@ -279,7 +279,7 @@ func registerVMLogsResource(srv *server.MCPServer, vmManager exec.VMManager, exe
 }
 
 // registerVMEnvironmentResource registers the VM environment resource
-func registerVMEnvironmentResource(srv *server.MCPServer, vmManager exec.VMManager, executor *exec.Executor) {
+func registerVMEnvironmentResource(srv *server.MCPServer, vmManager core.VMManager, executor *exec.Executor) {
 	envResource := mcp.NewResource(
 		"devvm://env/{vmName}",
 		"VM Environment",
@@ -302,12 +302,12 @@ func registerVMEnvironmentResource(srv *server.MCPServer, vmManager exec.VMManag
 		}
 
 		// Check VM state
-		state, err := vmManager.GetVMState(vmName)
+		state, err := vmManager.GetVMState(context.Background(), vmName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get VM state: %w", err)
 		}
 
-		if state != vm.Running {
+		if state != core.Running {
 			return nil, fmt.Errorf("VM is not running (current state: %s)", state)
 		}
 
@@ -342,7 +342,7 @@ func registerVMEnvironmentResource(srv *server.MCPServer, vmManager exec.VMManag
 }
 
 // registerVMInstalledToolsResource registers the VM installed tools resource
-func registerVMInstalledToolsResource(srv *server.MCPServer, vmManager exec.VMManager, executor *exec.Executor) {
+func registerVMInstalledToolsResource(srv *server.MCPServer, vmManager core.VMManager, executor *exec.Executor) {
 	toolsResource := mcp.NewResource(
 		"devvm://tools/{vmName}",
 		"VM Installed Tools",
@@ -365,12 +365,12 @@ func registerVMInstalledToolsResource(srv *server.MCPServer, vmManager exec.VMMa
 		}
 
 		// Check VM state
-		state, err := vmManager.GetVMState(vmName)
+		state, err := vmManager.GetVMState(context.Background(), vmName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get VM state: %w", err)
 		}
 
-		if state != vm.Running {
+		if state != core.Running {
 			return nil, fmt.Errorf("VM is not running (current state: %s)", state)
 		}
 

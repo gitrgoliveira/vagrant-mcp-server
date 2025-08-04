@@ -1,4 +1,4 @@
-name: Tests
+name: CI Pipeline
 
 on:
   push:
@@ -7,26 +7,26 @@ on:
     branches: [ main ]
 
 jobs:
-  test:
-    name: Run Tests
+  lint-test-build:
+    name: Lint, Test & Build
     runs-on: ubuntu-latest
     steps:
     - name: Check out code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: '1.21'
+        go-version: '1.24'
+        cache: true
 
     - name: Install dependencies
       run: |
         go mod download
         
-    - name: Run linting
+    - name: Install required tools
       run: |
-        go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-        golangci-lint run
+        make tools
 
     - name: Install Vagrant
       run: |
@@ -35,8 +35,23 @@ jobs:
         sudo apt update && sudo apt install vagrant
         vagrant --version
         
-    - name: Run tests
+    - name: Run full CI pipeline (format, lint, security, test, build)
       run: |
-        make test
+        make all
         
-  # We only need one test job now since all tests require Vagrant
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: vagrant-mcp-server-${{ github.sha }}
+        path: bin/vagrant-mcp-server
+        retention-days: 30
+        
+    - name: Check for formatting issues
+      run: |
+        # Verify that gofmt didn't change any files
+        if [ -n "$(git status --porcelain)" ]; then
+          echo "Files were modified by gofmt. Please run 'make fmt' locally and commit the changes."
+          git status --porcelain
+          exit 1
+        fi

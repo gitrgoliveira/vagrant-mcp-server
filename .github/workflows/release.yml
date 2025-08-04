@@ -1,0 +1,304 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v1.0.0)'
+        required: true
+        type: string
+
+env:
+  GO_VERSION: '1.24'
+  APP_NAME: 'vagrant-mcp-server'
+
+jobs:
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
+              echo "Invalid tag format. Use semantic versioning (e.g., v1.0.0, v1.0.0-beta.1)"
+              exit 1
+            fi
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Release tag: $TAG"
+          echo "Version: $VERSION"
+
+      - name: Validate tag exists (for workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if ! git tag -l | grep -q "^${{ steps.version.outputs.tag }}$"; then
+            echo "Tag ${{ steps.version.outputs.tag }} does not exist"
+            exit 1
+          fi
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Install required tools
+        run: make tools
+
+      - name: Install Vagrant
+        run: |
+          wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list > /dev/null
+          sudo apt update && sudo apt install vagrant
+          vagrant --version
+
+      - name: Run quality checks and tests
+        run: make fmt lint sec test
+
+  build:
+    name: Build Binaries
+    runs-on: ubuntu-latest
+    needs: [validate, test]
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          CGO_ENABLED: 0
+        run: |
+          # Set build variables
+          GIT_COMMIT=$(git rev-parse HEAD)
+          BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          GO_VERSION=$(go version | cut -d' ' -f3)
+          
+          # Create binary name
+          BINARY_NAME="${APP_NAME}-${GOOS}-${GOARCH}"
+          if [ "$GOOS" = "windows" ]; then
+            BINARY_NAME="${BINARY_NAME}.exe"
+          fi
+          
+          # Build with version injection
+          LDFLAGS="-ldflags=-X main.Version=v${VERSION} -X main.GitCommit=${GIT_COMMIT} -X main.BuildTime=${BUILD_TIME} -X main.GoVersion=${GO_VERSION} -w -s"
+          
+          echo "Building $BINARY_NAME..."
+          go build $LDFLAGS -o $BINARY_NAME ./cmd/server
+          
+          # Test the binary
+          if [ "$GOOS" = "linux" ] && [ "$GOARCH" = "amd64" ]; then
+            ./$BINARY_NAME -version
+          fi
+
+      - name: Generate checksums
+        run: |
+          BINARY_NAME="${APP_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY_NAME="${BINARY_NAME}.exe"
+          fi
+          
+          # Generate SHA256
+          if command -v sha256sum >/dev/null; then
+            sha256sum $BINARY_NAME > ${BINARY_NAME}.sha256
+          else
+            shasum -a 256 $BINARY_NAME > ${BINARY_NAME}.sha256
+          fi
+          
+          echo "Checksum for $BINARY_NAME:"
+          cat ${BINARY_NAME}.sha256
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            ${{ env.APP_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}*
+          retention-days: 5
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [validate, build]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Organize release assets
+        run: |
+          mkdir -p release-assets
+          
+          # Move all binaries and checksums to release-assets
+          find artifacts -name "${{ env.APP_NAME }}-*" -type f -exec cp {} release-assets/ \;
+          
+          # Create unified checksums file
+          cd release-assets
+          echo "# SHA256 Checksums for vagrant-mcp-server ${{ needs.validate.outputs.tag }}" > checksums.txt
+          echo "# Generated on $(date -u)" >> checksums.txt
+          echo "" >> checksums.txt
+          
+          for file in *.sha256; do
+            if [ -f "$file" ]; then
+              cat "$file" >> checksums.txt
+            fi
+          done
+          
+          # List all files
+          echo "Release assets:"
+          ls -la
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          # Get the previous tag for changelog
+          PREV_TAG=$(git tag --sort=-version:refname | grep -A1 "${{ needs.validate.outputs.tag }}" | tail -1)
+          
+          # Generate release notes
+          cat > release_notes.md << 'EOF'
+          ## Vagrant MCP Server ${{ needs.validate.outputs.tag }}
+          
+          ### Downloads
+          
+          Download the appropriate binary for your platform:
+          
+          | Platform | Architecture | Download |
+          |----------|--------------|----------|
+          | Linux | x86_64 | [vagrant-mcp-server-linux-amd64](../../releases/download/${{ needs.validate.outputs.tag }}/vagrant-mcp-server-linux-amd64) |
+          | Linux | ARM64 | [vagrant-mcp-server-linux-arm64](../../releases/download/${{ needs.validate.outputs.tag }}/vagrant-mcp-server-linux-arm64) |
+          | macOS | Intel | [vagrant-mcp-server-darwin-amd64](../../releases/download/${{ needs.validate.outputs.tag }}/vagrant-mcp-server-darwin-amd64) |
+          | macOS | Apple Silicon | [vagrant-mcp-server-darwin-arm64](../../releases/download/${{ needs.validate.outputs.tag }}/vagrant-mcp-server-darwin-arm64) |
+          | Windows | x86_64 | [vagrant-mcp-server-windows-amd64.exe](../../releases/download/${{ needs.validate.outputs.tag }}/vagrant-mcp-server-windows-amd64.exe) |
+          
+          ### Installation
+          
+          1. Download the appropriate binary for your platform
+          2. Make it executable (Linux/macOS): `chmod +x vagrant-mcp-server-*`
+          3. Move to your PATH: `sudo mv vagrant-mcp-server-* /usr/local/bin/vagrant-mcp-server`
+          4. Verify installation: `vagrant-mcp-server -version`
+          
+          ### Verification
+          
+          Verify the integrity of your download using SHA256 checksums:
+          
+          ```bash
+          # Download checksums file
+          curl -L -O https://github.com/vagrant-mcp/server/releases/download/${{ needs.validate.outputs.tag }}/checksums.txt
+          
+          # Verify your binary (example for Linux amd64)
+          sha256sum -c checksums.txt --ignore-missing
+          ```
+          
+          ### What's New
+          EOF
+          
+          # Add changelog if we have a previous tag
+          if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "${{ needs.validate.outputs.tag }}" ]; then
+            echo "" >> release_notes.md
+            echo "### Changes since $PREV_TAG" >> release_notes.md
+            echo "" >> release_notes.md
+            git log --pretty=format:"- %s" $PREV_TAG..${{ needs.validate.outputs.tag }} >> release_notes.md
+          else
+            echo "" >> release_notes.md
+            echo "Initial release of Vagrant MCP Server." >> release_notes.md
+          fi
+          
+          echo "" >> release_notes.md
+          echo "### Build Information" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "- **Version**: ${{ needs.validate.outputs.tag }}" >> release_notes.md
+          echo "- **Git Commit**: $(git rev-parse HEAD)" >> release_notes.md
+          echo "- **Build Time**: $(date -u)" >> release_notes.md
+          echo "- **Go Version**: $(go version | cut -d' ' -f3)" >> release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate.outputs.tag }}
+          name: Vagrant MCP Server ${{ needs.validate.outputs.tag }}
+          body_path: release_notes.md
+          files: |
+            release-assets/*
+          draft: false
+          prerelease: ${{ contains(needs.validate.outputs.tag, '-') }}
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release artifacts summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Release created successfully!**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag**: ${{ needs.validate.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Assets**: $(ls release-assets/ | wc -l) files" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Assets:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -la release-assets/ >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
